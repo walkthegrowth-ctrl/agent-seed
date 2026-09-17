@@ -17,14 +17,14 @@ The core has no idea whether it is being driven by a terminal, a browser, or
 client-only task (see `docs/protocol.md`).
 
 ```
-┌──────────────┐  HTTP/SSE   ┌──────────────┐   LLM (stream)  ┌─────────────┐
-│   frontend    │ ──────────▶ │    backend    │ ──────────────▶│ LLM (any    │
-│   (repl)      │ ◀────────── │   (FastAPI)   │ ◀──────────────│ OpenAI-     │
-└──────────────┘             └──────┬───────┘                  │ compat. box)│
-                                    │ uses                     └─────────────┘
+┌──────────────┐  HTTP/SSE   ┌──────────────┐  LLM (stream)  ┌─────────────┐
+│   frontend   │ ──────────▶ │    backend   │ ──────────────▶│ LLM (any    │
+│   (repl)     │ ◀────────── │   (FastAPI)  │ ◀──────────────│ OpenAI-     │
+└──────────────┘             └──────┬───────┘                │ compat. box)│
+                                    │ uses                   └─────────────┘
                                     ▼
                               ┌──────────┐
-                              │   core    │  Agent loop + tools + LLM client
+                              │   core   │  Agent loop + tools + LLM client
                               └──────────┘
 ```
 
