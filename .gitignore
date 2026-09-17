@@ -1,0 +1,19 @@
+# virtualenv / uv
+.venv/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# local config & editor/history secrets
+.env
+.repl_history
+
+# OS / editor noise
+.DS_Store
