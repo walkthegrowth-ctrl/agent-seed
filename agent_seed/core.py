@@ -5,7 +5,7 @@ wraps it in SSE; the REPL renders the same event stream.
 
 Extensibility lives in :mod:`agent_seed.hooks`: optional, named hooks
 attached to fixed points in the loop, all sharing one signature
-``(ctx: RunContext) -> None``. See ``docs/hooks.md``.
+``(ctx: RunContext) -> None``. See ``docs/manual.md``.
 
 A single :class:`RunContext` is created once per ``Agent`` and owned by it.
 The run-establishment hooks fire strictly once; the session-establishment
@@ -92,7 +92,7 @@ class Agent:
         """The current system prompt (what the core sends as ``messages[0]``).
 
         A hook may change this via ``ctx.system_prompt``; it then persists
-        across turns (it is sticky). See ``docs/hooks.md``, "System prompt
+        across turns (it is sticky). See ``docs/manual.md``, "System prompt
         (dynamic)".
         """
         return self._context.system_prompt
@@ -180,7 +180,7 @@ class Agent:
 
         Hooks attached (or discovered) fire into the shared
         :class:`~agent_seed.hooks.RunContext` in the documented lifecycle
-        order. See ``docs/hooks.md``.
+        order. See ``docs/manual.md``.
         """
         ctx = self._context
         self._turn_count += 1
@@ -202,7 +202,7 @@ class Agent:
             # Per-request working state, rebuilt from the current session
             # history. ``system_prompt`` is the run's current (possibly
             # hook-modified) value; ``before_llm`` may further replace it —
-            # see ``docs/hooks.md``, "System prompt (dynamic)".
+            # see ``docs/manual.md``, "System prompt (dynamic)".
             ctx.messages = [{"role": "system", "content": ctx.system_prompt or ""}]
             ctx.messages.extend(self.history)
             ctx.tools = self.registry.schemas()

@@ -10,7 +10,7 @@ Ultra minimalistic LLM agent with tool calling.
   OpenAI-compatible streaming LLM client and a decorator-based tool registry.
 - **Extensibility** — a frozen hook surface (`Hooks` + `RunContext`) that plugs
   behavior into the loop without subclassing, and a `hook_modules/` folder of
-  promoted hooks that is auto-discovered once per process (see `docs/hooks.md`).
+  promoted hooks that is auto-discovered once per process (see `docs/manual.md`).
 
 The core has no idea whether it is being driven by a terminal, a browser, or
 `curl`. The protocol is documented, so adding a web/TUI frontend is a
@@ -124,8 +124,7 @@ hook_modules/           promoted hook modules; auto-discovered once per process
 docs/
   architecture.md         layers, data flow, design decisions
   protocol.md             HTTP/SSE wire contract for frontends
-  adding-tools.md         how to register a new tool
-  hooks.md                hook surface: write + attach + promote hooks
+  manual.md               user manual: adding tools + writing/promoting hooks
 tests/
   conftest.py             FakeLLMClient + script helpers
   test_calculator.py
@@ -145,7 +144,7 @@ tests/
   boundaries and extension points).
 - **Extensibility via hooks, not subclassing.** New behavior (context, policy,
   budget, ...) attaches to fixed points in the loop through `Hooks`; promote a
-  hook to `hook_modules/` to auto-load it everywhere (see `docs/hooks.md`).
+  hook to `hook_modules/` to auto-load it everywhere (see `docs/manual.md`).
 - **`LLM_MODEL` is required.** The backend returns HTTP 500 if it is unset.
 
 ## License

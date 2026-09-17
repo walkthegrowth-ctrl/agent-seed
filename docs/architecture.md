@@ -26,7 +26,7 @@ and the whole system can be explained on one page.
 
 The only contract a frontend must honour is the HTTP/SSE protocol
 (see `protocol.md`). The only contract a tool must honour is a Python
-function with a docstring and type hints (see `adding-tools.md`). The core
+function with a docstring and type hints (see `manual.md`). The core
 has no idea whether it is being driven by a terminal, a browser, or a curl
 request.
 
@@ -47,7 +47,7 @@ request.
 | path | responsibility |
 |------|----------------|
 | `agent_seed/core.py` | `Agent`: history, tool loop, round-trip cap. Talks to LLM + registry. No I/O besides the two interfaces it is given. |
-| `agent_seed/hooks.py` | `Hooks` + `RunContext`: the stable, extensible point of the core. See `docs/hooks.md`. |
+| `agent_seed/hooks.py` | `Hooks` + `RunContext`: the stable, extensible point of the core. See `manual.md`. |
 | `agent_seed/discovery.py` | Auto-loads promoted hook modules from `hook_modules/` (once per process, cached; fail-fast). |
 | `agent_seed/llm.py` | `OpenAICompatClient`: streaming `POST /chat/completions`, SSE line parsing, chunk folding. `LLMConfig.from_env`. |
 | `agent_seed/tools.py` | `ToolRegistry`, `@tool`, JSON-schema generation from annotations, and the starter `calculator`. |
@@ -80,7 +80,7 @@ no auth, single-user by design — see below.
 
 ## Extending
 
-- New tool → register it (see `adding-tools.md`); the schema, dispatch, and
+- New tool → register it (see `manual.md`); the schema, dispatch, and
   tests all fall out for free.
 - New frontend → implement the protocol (see `protocol.md`); reuse
   `frontends/repl/app.py::Session` as a reference client or speak raw HTTP.
@@ -88,7 +88,7 @@ no auth, single-user by design — see below.
   way `backends/http/server.py` does; `Agent.chat(message, on_token, on_event)`
   is the stable interface.
 - New agent behavior (context, policy, budget, ...) → write a hook and attach
-  it via `Hooks(...)` (see `docs/hooks.md`); promote a hook module (a
+  it via `Hooks(...)` (see `manual.md`); promote a hook module (a
   `def make() -> Hooks` file) into `hook_modules/` to auto-load it in every
   `Agent`. Prototype in `experiments/` first — never auto-loaded. No core
   changes needed.

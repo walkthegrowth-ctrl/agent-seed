@@ -29,7 +29,7 @@ type hints in code.
   stable API is `Agent.chat(message, on_token, on_event)`. The run-scoped
   `RunContext` is internal to the `Agent` (`Agent.context`), not a `chat()` argument.
 - `agent_seed/hooks.py` — `Hooks` + `RunContext`: the extensibility surface. See
-  `docs/hooks.md`.
+  `docs/manual.md`.
 - `agent_seed/discovery.py` — auto-loads hook modules from `hook_modules/` once per
   process (`get_hooks`, cached; fail-fast).
 - `agent_seed/llm.py` — streaming client + `LLMConfig.from_env`. **No LLM SDK**; raw
@@ -75,8 +75,8 @@ type hints in code.
 
 - Small, explicit, standard library where it fits.
 - Tool schemas for new tools are derived from the function's name, first-line docstring,
-  and type hints — keep functions annotated. See `docs/adding-tools.md`.
+  and type hints — keep functions annotated. See `docs/manual.md`.
 - New agent behavior (context, policy, budget, ...) is a hook in `experiments/`,
   attached via `Agent(..., hooks=Hooks(...))` or `create_app(hooks=...)`; promote it
   to `hook_modules/` (a `def make() -> Hooks` file) to auto-load it everywhere.
-  See `docs/hooks.md` (user manual).
+  See `docs/manual.md` (user manual).

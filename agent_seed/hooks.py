@@ -33,9 +33,9 @@ What a hook is **not**:
 * It is not a subclassing scheme. You do not subclass ``Agent``; you
   attach hooks via the ``Hooks`` dataclass, or by dropping a hook module
   into the ``hook_modules/`` folder (auto-discovered once per process —
-  see ``docs/hooks.md``, "Promoting experiments").
+  see ``docs/manual.md``, "Promoting experiments").
 
-See ``docs/hooks.md`` for the full user manual.
+See ``docs/manual.md`` for the full user manual.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ Hook = Callable[["RunContext"], None]
 class RunContext:
     """Shared object passed to every hook in one agent interaction.
 
-    Ownership is explicit per field (also listed in ``docs/hooks.md``):
+    Ownership is explicit per field (also listed in ``docs/manual.md``):
 
     * Core-managed — set by the core; hooks may read, most may modify.
     * Caller-supplied — optional ids the caller may pre-fill; the core
