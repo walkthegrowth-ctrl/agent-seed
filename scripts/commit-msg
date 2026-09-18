@@ -1,0 +1,26 @@
+#!/bin/sh
+# Commit-message guard.
+#
+# This project's commits are authored by the owner only (Sky Forge /
+# walkthegrowth). Commit messages must carry no AI-provider or assistant
+# attribution — no `Co-Authored-By`, `Generated-By`, model names (Claude, ...),
+# or provider names (Anthropic, Copilot, Codex, ...). See AGENTS.md.
+#
+# Install (once per clone):  cp scripts/commit-msg .git/hooks/commit-msg && chmod +x .git/hooks/commit-msg
+
+msg="$1"
+
+# Case-insensitive, whole-file scan of the proposed commit message.
+if grep -qiE -e 'co-?authored-?by' -e 'generated-?by' -e 'claude' -e 'anthropic' -e 'copilot' -e 'codex' "$msg"; then
+  {
+    echo
+    echo "commit-msg: REJECTED — commit messages must not carry AI-provider or"
+    echo "assistant attribution (Co-Authored-By / Generated-By / model names such"
+    echo "as Claude / Anthropic / Copilot / Codex / ...). Author and attribution"
+    echo "are the owner's (Sky Forge / walkthegrowth) only. See AGENTS.md."
+    echo
+  } >&2
+  exit 1
+fi
+
+exit 0

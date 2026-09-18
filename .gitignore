@@ -17,3 +17,6 @@ htmlcov/
 
 # OS / editor noise
 .DS_Store
+
+# agent instructions (kept locally, not tracked)
+AGENTS.md
