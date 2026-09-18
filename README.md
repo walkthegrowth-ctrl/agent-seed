@@ -76,7 +76,8 @@ uv run agent-repl                 # defaults to http://127.0.0.1:8787
 ```
 
 REPL commands: `/help`, `/reset` (clear server-side session), `/tools`,
-`/model` (backend LLM config), `/quit`. Type `/quit` or press `Ctrl-D` to exit.
+`/agent [name]` / `/agents` (switch / list agents), `/model` (backend LLM config),
+`/quit`. Type `/quit` or press `Ctrl-D` to exit.
 
 ### Example
 
@@ -130,8 +131,12 @@ tests/
   conftest.py             FakeLLMClient + script helpers
   test_calculator.py
   test_agent.py           agent loop (tool round-trips, errors, round cap)
+  test_hooks.py           Hooks/RunContext defaults + slot wiring
+  test_discovery.py       hook_modules scan, agent selection, enter/exit boundary
   test_llm.py             SSE parsing + chunk folding
   test_backend.py         real FastAPI app end-to-end (mocked LLM)
+  test_repl.py            REPL: SSE parse + Session client
+  test_repl_loop.py       REPL: command loop + slash commands
 ```
 
 ## Design notes

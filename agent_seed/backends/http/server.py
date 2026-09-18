@@ -1,9 +1,12 @@
 """FastAPI app: SSE stream of agent events over HTTP.
 
 Wire format (see docs/protocol.md):
-    POST /chat  body {"session_id"?, "message"}  -> text/event-stream
-    GET  /tools -> tool schemas
-    GET  /health
+    POST /chat    body {"session_id"?, "message", "agent_name"?} -> text/event-stream
+    GET  /agents  -> discoverable agent names (subdirectories of the hooks root)
+    GET  /config  -> server-side LLM config (llm | null)
+    GET  /health  -> {"status": "ok", "version": ...}
+    GET  /tools   -> tool schemas (OpenAI function form) + names
+    POST /reset   body {"session_id"} -> clears that session's history
 """
 
 from __future__ import annotations

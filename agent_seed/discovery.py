@@ -4,18 +4,49 @@ A **hook module** is a standalone ``.py`` file that exposes one factory:
 
     def make() -> Hooks: ...
 
-``get_hooks()`` scans the folder, imports each module, calls ``make()``,
-and merges the results in **alphabetical file order** (on a slot conflict,
-the file that sorts last wins). Discovery happens **once per process per
-folder** and is cached: the first use does one directory scan + import +
-merge, every later use is a dict lookup.
+Public API
+----------
+
+* ``DEFAULT_HOOKS_FOLDER`` — the folder name relative to the CWD
+  (``"hook_modules"``).
+* ``_root_folder()`` — the hooks root: ``$HOOKS_ROOT`` (env) if set, else
+  ``hook_modules`` relative to the CWD.
+* ``get_hooks(folder=None)`` — the merged hooks for ``folder`` (default
+  ``DEFAULT_HOOKS_FOLDER``), **cached by resolved path per process**.
+* ``resolve_hooks_folder(agent_name=None)`` — map an ``agent_name`` to a
+  folder: ``<root>/<agent_name>`` if that subdirectory exists, else the root
+  (the "default agent"). Traversal (``..``) and names escaping the root are
+  rejected and fall back to the root.
+* ``get_hooks_for_agent(agent_name=None)`` — ``get_hooks(resolve_hooks_folder(
+  agent_name))``; the merged hooks for the agent (root folder when ``None``),
+  cached.
+* ``list_agents()`` — the sorted names of subdirectories of the root, i.e. the
+  discoverable ``agent_name`` values (an empty list when the root is absent or
+  flat).
+* ``reset_cache()`` — drop all cached discoveries (for tests / hot reload).
+  The cache is per resolved folder; changing ``$HOOKS_ROOT`` between calls
+  requires ``reset_cache()`` to take effect.
+
+Behavior
+--------
+
+``discover(folder)`` (called by ``get_hooks`` on a cache miss) scans the
+folder, imports each ``*.py`` module under a unique name, validates it exposes
+a ``make`` callable, and calls ``make()``. The resulting :class:`Hooks` are
+merged in **alphabetical file order** (on a slot conflict, the file that sorts
+last wins). Discovery happens **once per process per folder** and is cached:
+the first use does one directory scan + import + merge, every later use is a
+dict lookup.
 
 Missing or empty folder -> ``Hooks()`` (no cost, old behavior).
 
 Failures are **fail-fast**: a module that fails to import, that lacks
 ``make``, or whose ``make()`` raises / returns something other than
-``Hooks`` raises a :class:`DiscoveryError` naming the offending file.
-Nothing is half-merged.
+``Hooks`` raises a :class:`DiscoveryError` naming the offending file. Nothing
+is half-merged. When an ``agent_name`` is in play, a broken
+``hook_modules/<agent_name>/`` therefore surfaces the same way — as a
+``DiscoveryError`` from ``get_hooks_for_agent`` (not a silent skip), so the
+``Agent.set_agent_name`` switch aborts with nothing committed.
 """
 
 from __future__ import annotations

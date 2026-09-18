@@ -26,7 +26,8 @@ Companion documents:
   - [What a hook is](#what-a-hook-is)
   - [The full list of hooks (reference)](#the-full-list-of-hooks-reference)
   - [The four levels](#the-four-levels)
-  - [The two lifetimes inside a `RunContext`](#the-two-lifetimes-inside-a-runcontext)
+  - [Reading the Agent's state](#reading-the-agents-state)
+  - [The three lifetimes inside a `RunContext`](#the-three-lifetimes-inside-a-runcontext)
   - [Lifecycle](#lifecycle)
     - [`RunContext` reference](#runcontext-reference)
     - [`extras`: the walls](#extras-the-walls)
@@ -37,6 +38,7 @@ Companion documents:
     - [Merge policies](#merge-policies)
     - [Overriding discovery](#overriding-discovery)
   - [Agents: hook subdirectories](#agents-hook-subdirectories)
+    - [Your first agent (end to end)](#your-first-agent-end-to-end)
     - [The agent-identity boundary (enter / exit)](#the-agent-identity-boundary-enter--exit)
   - [Which hook to use, by goal](#which-hook-to-use-by-goal)
   - [Worked examples](#worked-examples)
@@ -72,11 +74,12 @@ For a function `foo(a: str, b: int) -> float` with docstring `"Do the thing."`:
 | `bool`           | `{"type": "boolean"}` |
 | `list[T]`        | `{"type": "array", "items": <T>}` |
 | `dict`           | `{"type": "object"}` |
-| `Any` / unannotated | `{}` |
+| `Any`            | `{}` (no type constraint) |
+| *unannotated*    | param is dropped from the schema (annotate it to expose it) |
 
 ### Registration
 
-There are three equivalent ways to register:
+There are two equivalent ways to register:
 
 ```python
 from agent_seed.tools import ToolRegistry
@@ -84,7 +87,6 @@ from agent_seed.tools import ToolRegistry
 registry = ToolRegistry()
 
 
-# 1) explicit register
 def echo(text: str) -> str:
     """Return the input unchanged."""
     return text
@@ -93,7 +95,7 @@ def echo(text: str) -> str:
 registry.register(echo)
 
 
-# 2) the @tool decorator form
+# or the @tool decorator form (equivalent):
 @registry.tool
 def echo2(text: str) -> str:
     """Return the input unchanged."""
@@ -256,10 +258,26 @@ debugging, logging, and future parallel runs — today it is 1:1 with the
 | **turn**        | `turn`            | one user message (1-based run counter)         | core                                              |
 | **tool_loop**   | `tool_loop_round` | one LLM→tools iteration within a turn (0-based)| core                                              |
 
-### The two lifetimes inside a `RunContext`
+### Reading the Agent's state
 
-This is the most important part of the model. A `RunContext` has **two kinds
-of fields**, and the core treats them differently:
+The run-scoped state is read back from the `Agent` as read-only surfaces
+(change it through a hook's `RunContext`, or `set_session` / `set_agent_name`
+for the session / agent — not by writing these):
+
+| surface | what it gives you |
+|---------|-------------------|
+| `agent.agent_name`    | the active agent (`None` = the main / root agent) |
+| `agent.run_id`        | the established run id (auto-generated if none was set) |
+| `agent.session_id`    | the active session id |
+| `agent.base_prompt`   | the immutable system prompt for the run |
+| `agent.system_prompt` | the current system prompt (sticky; a hook may have changed it) |
+| `agent.history`       | the stored message list (every turn so far) |
+| `agent.context`       | the full `RunContext` (run-scoped fields + the per-request fields of the last `chat()`) |
+
+### The three lifetimes inside a `RunContext`
+
+This is the most important part of the model. A `RunContext` has **three
+lifetimes** for its fields, and the core treats each differently:
 
 | | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          |
 |---|----------------------------------------|--------------------------------------------------|
@@ -278,13 +296,14 @@ Consequences a hook can rely on:
 
 ### Lifecycle
 
-Establishment runs **when needed**, not every turn:
+Establishment runs **when needed** — once per run / per session, and **re-fires
+when the active agent or session changes** — not on every `chat()`:
 
 ```
 Agent is used for the first time (or after Agent.set_session)
-├─ initialize_run(ctx)       # exactly once per run  →  hook may set ctx.run_id
+├─ initialize_run(ctx)       # once per (re)establishment  →  hook may set ctx.run_id
 │   [core: if still None → auto-generate]
-├─ ready_run(ctx)            # exactly once per run →  ctx.run_id guaranteed non-None
+├─ ready_run(ctx)            # once per (re)establishment  →  ctx.run_id guaranteed non-None
 │
 ├─ initialize_session(ctx)   # on every session (re-)establishment
 │   [core: if ctx.session_id is None → auto-generate]
@@ -315,8 +334,10 @@ chat() ends —> the core returns ctx.final_answer
 
 Notes:
 
-- Establishment hooks fire **once** (run) or **on session (re-)establishment**
-  (session) — not on every `chat()`.
+- Establishment hooks fire **on need**: the run hooks once per (re)establishment,
+  the session hooks on each active-session (re)establishment. Re-establishment
+  happens on the first `chat()` and whenever the active session or agent changes
+  (`set_session` / `set_agent_name`) — not on every `chat()`.
 - `before_llm`, `on_round` fire once per round; `before_tool_call`,
   `after_tool_call` fire once per tool call (several possible per round).
 - A vetoed tool call fires `before_tool_call` (setting `ctx.tool_call = None`)
@@ -542,6 +563,41 @@ agent.agent_name                                        # read it back
 # backend:  POST /chat  { "message": "...", "agent_name": "alpha" }
 # frontend: GET /agents  ->  { "agents": ["alpha", "gamma"] }
 ```
+
+#### Your first agent (end to end)
+
+An **agent** is a subdirectory of the hooks root holding ordinary hook modules
+(a `def make() -> Hooks` per file, see ["The contract:
+`make()`"](#the-contract-make)). It *replaces* the root's hooks for that agent
+(the root stays the fallback). To add one: make the folder, drop a file, done.
+
+```
+hook_modules/             the main agent (unchanged; still the fallback)
+hook_modules/alpha/
+    sign.py               alpha's own hook(s)
+```
+
+```python
+# hook_modules/alpha/sign.py
+from agent_seed.hooks import Hooks, RunContext
+
+
+def finish(ctx: RunContext) -> None:
+    if ctx.final_answer is not None:
+        ctx.final_answer = f"{ctx.final_answer}\n— alpha"
+
+
+def make() -> Hooks:
+    return Hooks(finish=finish)
+```
+
+A folder may hold several `make()` files; they merge alphabetically (last slot
+wins), exactly like the root. `GET /agents` (or `/agents` in the REPL) lists
+the subdirectories of the hooks root — `{"agents": ["alpha"]}` here; an empty
+list means only the main agent exists. Now pick `alpha` (above); its hooks swap
+in for the root's and its establishment hooks re-fire on the next `chat()`
+(further below). To remove the agent, delete `hook_modules/alpha/`. No
+registration anywhere.
 
 #### The agent-identity boundary (enter / exit)
 

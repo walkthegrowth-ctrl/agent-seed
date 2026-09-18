@@ -99,8 +99,9 @@ class Session:
         self.agent_name = name
 
     def model(self) -> dict[str, Any] | None:
-        # Best-effort: not exposed by the API contract in v0; REPL shows it
-        # only when the backend adds a /config endpoint.
+        # /config is part of the documented protocol, but the REPL treats it
+        # as optional: it shows the config only when the backend answers 200
+        # (older backends without the endpoint simply render nothing).
         try:
             response = self.client.get(f"{self.url}/config")
             if response.status_code == 200:

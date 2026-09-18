@@ -16,16 +16,17 @@ Two things are defined here:
   ``chat()``; the rest run inside ``chat()`` in the listed order.
 
 * :class:`RunContext` — the single shared object owned by one run (one
-  ``Agent``, one ``RunContext``), passed to every hook. It has two
-  lifetimes:
+  ``Agent``, one ``RunContext``), passed to every hook. Its fields fall into
+  three lifetimes:
 
   - *run-scoped* fields persist across turns (and survive ``reset()``):
     ``run_id``, ``session_id``, ``agent_name``, ``turn``, ``base_prompt``
     (immutable), ``system_prompt`` (sticky — a hook change holds until
     changed again), cumulative ``usage``, and ``extras``.
   - *per-request* fields are rebuilt by the core on each LLM call:
-    ``messages``, ``tools``, ``tool_loop_round``; and *per-call* fields set
-    for each tool call: ``tool_call``, ``tool_result``, ``final_answer``.
+    ``messages``, ``tools``, ``tool_loop_round``.
+  - *per-call* fields are set for each tool call or turn:
+    ``tool_call``, ``tool_result``, ``final_answer``.
 
 What a hook is **not**:
 
