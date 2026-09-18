@@ -59,6 +59,19 @@ backend. If you build a new frontend, this is the only spec you need.
 
 `tools` is in OpenAI function-calling schema form, ready to be forwarded.
 
+## `GET /agents`
+
+`200` — the discoverable agent names (subdirectories of the hooks root),
+sorted. Pass any of them as `agent_name` in `POST /chat` to switch the
+agent's hooks to that subdirectory.
+
+```json
+{ "agents": ["alpha", "gamma"] }
+```
+
+An empty list (or no `/agents` support on an older backend) means only the
+default agent (the `hook_modules/` root) is available.
+
 ## `POST /reset`
 
 Body: `{ "session_id": "<id>" }` → `200 { "ok": true, "session_id": "<id>" }`.
@@ -70,11 +83,16 @@ Clears that session's message history. Client may also simply start using a new
 Body:
 
 ```json
-{ "message": "what is 12 * 13?", "session_id": "<optional>" }
+{ "message": "what is 12 * 13?", "session_id": "<optional>", "agent_name": "<optional>" }
 ```
 
 If `session_id` is omitted, the server assigns one and returns it in the
 `X-Session-Id` response header and the final `done` event.
+
+`agent_name` is optional. When provided, the agent's hooks are re-resolved
+against `hook_modules/<agent_name>/` (falling back to `hook_modules/` if
+that subdirectory does not exist) and the establishment hooks re-fire
+(see `manual.md`). Omit it to keep / use the default agent.
 
 Response: `200`, `Content-Type: text/event-stream`, `X-Session-Id: <id>`.
 

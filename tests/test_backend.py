@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from agent_seed.backends.http import server
 from agent_seed.tools import ToolRegistry, calculator
+from agent_seed.tools import registry as default_registry
 
 
 def _events(raw_text):
@@ -116,3 +117,84 @@ def test_chat_missing_model_returns_500(monkeypatch, tmp_path):
         response = test_client.post("/chat", json={"message": "hi"})
     assert response.status_code == 500
     assert "LLM_MODEL" in response.json()["error"]
+
+
+# -- agents ------------------------------------------------------------------
+
+
+def test_agents_endpoint_lists_subdirs(monkeypatch, tmp_path):
+    (tmp_path / "hook_modules" / "alpha").mkdir(parents=True)
+    (tmp_path / "hook_modules" / "gamma").mkdir(parents=True)
+    monkeypatch.setattr(
+        "agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path / "hook_modules")
+    )
+    from agent_seed.discovery import reset_cache
+
+    reset_cache()
+
+    registry = ToolRegistry()
+    app = server.create_app(registry)
+    with TestClient(app) as test_client:
+        response = test_client.get("/agents")
+    assert response.status_code == 200
+    assert response.json() == {"agents": ["alpha", "gamma"]}
+
+
+def test_chat_agent_name_selects_subdir_hooks(monkeypatch, tmp_path):
+    # Use an after_tool_call hook: it rewrites ctx.tool_result, which the
+    # backend emits in the SSE `tool` event — so the marker appears on the
+    # wire and we can assert which folder's hook ran.
+    hooks_root = tmp_path / "hook_modules"
+    (hooks_root / "alpha").mkdir(parents=True)
+    (hooks_root / "alpha" / "a.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 100\n"
+        "def make() -> Hooks:\n    return Hooks(after_tool_call=after_tool_call)\n"
+    )
+    (hooks_root / "root.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 1000\n"
+        "def make() -> Hooks:\n    return Hooks(after_tool_call=after_tool_call)\n"
+    )
+
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(hooks_root))
+
+    from agent_seed.discovery import reset_cache
+
+    reset_cache()
+
+    from tests.conftest import text_completion, tool_completion
+
+    script = [
+        tool_completion("calculator", {"expression": "1+1"}),
+        text_completion("done"),
+        tool_completion("calculator", {"expression": "1+1"}),
+        text_completion("done"),
+    ]
+
+    def fake_client_factory(cfg):
+        class _Fake:
+            def chat(self, messages, tools=None, on_token=None):
+                completion = script.pop(0)
+                if on_token is not None and completion.content:
+                    on_token(completion.content)
+                return completion
+
+        return _Fake()
+
+    monkeypatch.setattr(server, "OpenAICompatClient", fake_client_factory)
+    app = server.create_app(default_registry)
+
+    with TestClient(app) as test_client:
+        # agent_name = "alpha": alpha's after_tool_call (x100) runs
+        with test_client.stream(
+            "POST", "/chat", json={"message": "hi", "agent_name": "alpha"}
+        ) as response:
+            body = "".join(response.iter_text())
+        assert "200.0" in body and "2000.0" not in body
+
+        # no agent_name: root's after_tool_call (x1000) runs
+        with test_client.stream("POST", "/chat", json={"message": "hi"}) as response:
+            body = "".join(response.iter_text())
+        assert "2000.0" in body and "200.0" not in body

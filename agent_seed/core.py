@@ -21,7 +21,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-from .discovery import get_hooks
+from .discovery import get_hooks_for_agent
 from .hooks import Hooks, RunContext
 from .llm import LLMConfig, OpenAICompatClient
 from .tools import ToolError, ToolRegistry
@@ -41,6 +41,12 @@ class Agent:
     The run owns a single :class:`RunContext`. A run may switch which
     session it is driving (one at a time); the session-establishment hooks
     re-fire on each switch, the run-establishment hooks only on first use.
+    A run may also switch its active agent (``agent_name`` → which hooks
+    subdirectory is used). There is always an agent in place (the nameless
+    main agent, ``agent_name=None``, is the default). The agent-identity
+    boundary hooks ``enter_agent`` / ``exit_agent`` bracket each switch
+    (``exit`` on the old agent, ``enter`` on the new one), and the
+    establishment hooks re-fire afterwards (see :meth:`set_agent_name`).
     """
 
     def __init__(
@@ -51,12 +57,14 @@ class Agent:
         hooks: Hooks | None = None,
         run_id: str | None = None,
         session_id: str | None = None,
+        agent_name: str | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
-        # None -> auto-discovered from the hook_modules/ folder (cached per
-        # process); an explicit Hooks always wins over discovery.
-        self.hooks = hooks if hooks is not None else get_hooks()
+        # None -> auto-discovered from the hook folder (cached per process);
+        # an explicit Hooks always wins over discovery.
+        self._hooks_explicit = hooks is not None
+        self.hooks = hooks if hooks is not None else get_hooks_for_agent(agent_name)
         self.history: list[dict[str, Any]] = []
         self._turn_count = 0
         self._run_established = False
@@ -68,11 +76,18 @@ class Agent:
             ctx.run_id = run_id
         if session_id is not None:
             ctx.session_id = session_id
+        ctx.agent_name = agent_name
         # The base prompt is immutable for the run; the system prompt is the
         # current (potentially hook-modified) value.
         ctx.base_prompt = system_prompt
         ctx.system_prompt = system_prompt
         self._context = ctx
+
+        # First activation: the agent on the driver seat takes over. There is
+        # no prior agent to exit, so only enter_agent fires — even for the
+        # main (nameless) agent. If it raises, Agent construction fails.
+        if self.hooks.enter_agent is not None:
+            self.hooks.enter_agent(ctx)
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> Agent:
@@ -106,6 +121,11 @@ class Agent:
         return self._context.session_id
 
     @property
+    def agent_name(self) -> str | None:
+        """The active agent name (``None`` = the main / root agent)."""
+        return self._context.agent_name
+
+    @property
     def context(self) -> RunContext:
         """The run-scoped :class:`RunContext` this run is operating on."""
         return self._context
@@ -131,6 +151,45 @@ class Agent:
         if session_id == self._context.session_id:
             return
         self._context.session_id = session_id
+        self._session_established = False
+
+    def set_agent_name(self, agent_name: str | None) -> None:
+        """Switch the active agent (which hooks / agent set this run uses).
+
+        Fire on every *real* switch (``agent_name != current``); a re-select of
+        the same agent is a no-op and fires nothing. There is always an agent
+        in place (the nameless main agent when ``None``), so:
+
+        - the **outgoing** agent's ``exit_agent`` fires first (its hooks are
+          still active; ``ctx.agent_name`` is the *old* value). Raising it
+          aborts the switch — no state is touched.
+        - the switch is then committed (``ctx.agent_name`` updated; hooks
+          re-resolved unless an explicit ``Hooks`` was supplied at
+          construction, which always wins).
+        - the **incoming** agent's ``enter_agent`` fires (``ctx.agent_name`` is
+          now the *new* value).
+
+        The new agent's establishment hooks (``initialize_run`` / ``ready_run``
+        / ``initialize_session`` / ``ready_session``) then re-fire on the next
+        ``chat()`` — so the full order is ``exit -> enter -> establishment``.
+        History, ``run_id``, ``session_id``, and ``extras`` are left alone.
+        """
+        if agent_name == self._context.agent_name:
+            return
+        # Resolve the incoming hooks BEFORE touching state: a broken
+        # hook_modules/<new>/ must abort the switch cleanly (DiscoveryError).
+        new_hooks = self.hooks if self._hooks_explicit else get_hooks_for_agent(agent_name)
+        # Outgoing agent takes the wheel off. If it raises, nothing is changed.
+        if self.hooks.exit_agent is not None:
+            self.hooks.exit_agent(self._context)
+        # Commit the switch.
+        self._context.agent_name = agent_name
+        if not self._hooks_explicit:
+            self.hooks = new_hooks
+        # Incoming agent takes the wheel.
+        if self.hooks.enter_agent is not None:
+            self.hooks.enter_agent(self._context)
+        self._run_established = False
         self._session_established = False
 
     # ------------------------------------------------------------------

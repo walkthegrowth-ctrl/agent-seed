@@ -57,6 +57,7 @@ All config is via environment variables (see `.env.example`):
 | `LLM_MODEL` | — *(required)* | model name (e.g. `qwen3:8b`) |
 | `AGENT_SERVER_HOST` | `127.0.0.1` | bind host for the backend |
 | `AGENT_SERVER_PORT` | `8787` | bind port for the backend |
+| `HOOKS_ROOT` | `hook_modules` | hooks folder (root agent); agent subdirs live under it |
 
 ## Run
 
@@ -108,7 +109,7 @@ Streams `event: tool`, `event: token`, and a final `event: done`
 agent_seed/
   core.py                 Agent: history + LLM/tool loop (framework-agnostic)
   hooks.py                Hooks + RunContext: the stable extension surface
-  discovery.py            auto-loads promoted hooks from hook_modules/
+  discovery.py            auto-loads promoted hooks from hook_modules/ (+ agent subdirs)
   llm.py                  OpenAI-compatible streaming client (httpx)
   tools.py                @tool registry, JSON-schema gen, calculator
   backends/
@@ -120,7 +121,7 @@ agent_seed/
       app.py              REPL: Session client, SSE parse + render, /commands
       cli.py              `agent-repl` entry point
 experiments/            prototype hook modules (e.g. ahem.py); never auto-loaded
-hook_modules/           promoted hook modules; auto-discovered once per process
+hook_modules/           promoted hook modules (the default agent); subdirs are agents
 docs/
   architecture.md         layers, data flow, design decisions
   protocol.md             HTTP/SSE wire contract for frontends
@@ -145,6 +146,9 @@ tests/
 - **Extensibility via hooks, not subclassing.** New behavior (context, policy,
   budget, ...) attaches to fixed points in the loop through `Hooks`; promote a
   hook to `hook_modules/` to auto-load it everywhere (see `docs/manual.md`).
+- **Agents.** `hook_modules/<name>/` is an alternate hook set selected by
+  `agent_name` (`Agent(agent_name=...)`, `POST /chat`, REPL `/agent`); the root
+  folder is the default agent (see `docs/manual.md`).
 - **`LLM_MODEL` is required.** The backend returns HTTP 500 if it is unset.
 
 ## License

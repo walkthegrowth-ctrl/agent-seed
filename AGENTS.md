@@ -31,7 +31,9 @@ type hints in code.
 - `agent_seed/hooks.py` — `Hooks` + `RunContext`: the extensibility surface. See
   `docs/manual.md`.
 - `agent_seed/discovery.py` — auto-loads hook modules from `hook_modules/` once per
-  process (`get_hooks`, cached; fail-fast).
+  process (`get_hooks`, cached; fail-fast). `agent_name` → `hook_modules/<name>/`
+  via `resolve_hooks_folder`/`get_hooks_for_agent`; `list_agents()` lists subdirs;
+  root is `$HOOKS_ROOT` or CWD-relative `hook_modules/`.
 - `agent_seed/llm.py` — streaming client + `LLMConfig.from_env`. **No LLM SDK**; raw
   `httpx` against OpenAI-compatible `/chat/completions`.
 - `agent_seed/tools.py` — `ToolRegistry`, `@tool`, JSON-schema generation, and the
@@ -44,6 +46,11 @@ type hints in code.
 - `hook_modules/` — promoted hook modules. Auto-discovered once per process: every `*.py`
   that defines `def make() -> Hooks` is merged in (alphabetical, last wins on conflicts).
   Promotion from `experiments/` is a plain `cp`. No `__init__.py` there on purpose.
+  Subdirectories are **agents**: `hook_modules/<agent_name>/` is an alternate hook set,
+  selected by `agent_name` (replace semantics — the root's `*.py` do not apply to that
+  agent). The root is the default agent and the fallback for names with no subdirectory.
+  `agent_name` is on `RunContext`, set via `Agent(agent_name=...)`,
+  `Agent.set_agent_name(...)`, or the `agent_name` field on `POST /chat`.
 
 ## Gotchas
 
@@ -61,15 +68,30 @@ type hints in code.
   goes on `RunContext` (append-only, with defaults) — never on hook signatures.
   `ctx.extras` is hooks-only: the core never reads or writes it.
 - **`RunContext` has two lifetimes.** Run-scoped fields (`run_id`, `session_id`,
-  `base_prompt`, `system_prompt`, `turn`, `usage`, `extras`) are sticky across turns
-  and survive `reset()`. Per-request fields (`messages`, `tools`, `tool_loop_round`)
-  are rebuilt by the core before each `before_llm` — never rely on stale per-request
-  values. Don't mutate stored history from a hook; use `ctx.system_prompt` (canonical
-  channel) to change the system prompt, not `messages[0]` directly.
+  `agent_name`, `base_prompt`, `system_prompt`, `turn`, `usage`, `extras`) are sticky
+  across turns and survive `reset()`. Per-request fields (`messages`, `tools`,
+  `tool_loop_round`) are rebuilt by the core before each `before_llm` — never rely on
+  stale per-request values. Don't mutate stored history from a hook; use `ctx.system_prompt`
+  (canonical channel) to change the system prompt, not `messages[0]` directly.
+- **Agents are hook subdirectories, replace semantics.** `agent_name` selects
+  `hook_modules/<name>/` *instead of* the root (the root's `*.py` do not apply), with the
+  root as the default/fallback. A matching-name switch re-resolves hooks and re-fires all
+  four establishment hooks (like `set_session`). `agent_name` is traversal-safe and
+  overridable via `HOOKS_ROOT`.
+- **There is always an agent in place — the main agent is the nameless root.**
+  `None` is the main agent, not a "no agent" state.
+- **Agent identity boundary: `enter_agent` / `exit_agent`.** `enter_agent` fires on
+  first activation (Agent ctor, even for the main agent) and as the incoming agent on
+  every switch; `exit_agent` fires as the outgoing agent on every switch, never at
+  construction. A switch is atomic: resolve new hooks first (broken subdir aborts
+  cleanly), then `exit` (old) → commit → `enter` (new); the new agent's establishment
+  hooks re-fire on the next `chat()`. `exit_agent` raising aborts the switch; a
+  re-select of the same agent fires nothing.
 - **Establishment fires on need, not per chat.** The run-establishment hooks
   (`initialize_run`, `ready_run`) fire exactly once per `Agent`. The session-establishment
   hooks (`initialize_session`, `ready_session`) fire on the first chat and again whenever
-  the active session changes (`Agent.set_session`). Don't assume they fire every turn.
+  the active session changes (`Agent.set_session`). An `agent_name` switch
+  (`Agent.set_agent_name`) re-fires both groups. Don't assume they fire every turn.
 
 ## Style
 

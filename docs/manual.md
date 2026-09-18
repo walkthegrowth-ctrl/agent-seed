@@ -24,6 +24,7 @@ Companion documents:
   - [Testing tools](#testing-tools)
 - [Hooks — the extension surface](#hooks--the-extension-surface)
   - [What a hook is](#what-a-hook-is)
+  - [The full list of hooks (reference)](#the-full-list-of-hooks-reference)
   - [The four levels](#the-four-levels)
   - [The two lifetimes inside a `RunContext`](#the-two-lifetimes-inside-a-runcontext)
   - [Lifecycle](#lifecycle)
@@ -35,6 +36,8 @@ Companion documents:
     - [The contract: `make()`](#the-contract-make)
     - [Merge policies](#merge-policies)
     - [Overriding discovery](#overriding-discovery)
+  - [Agents: hook subdirectories](#agents-hook-subdirectories)
+    - [The agent-identity boundary (enter / exit)](#the-agent-identity-boundary-enter--exit)
   - [Which hook to use, by goal](#which-hook-to-use-by-goal)
   - [Worked examples](#worked-examples)
   - [Testing hooks](#testing-hooks)
@@ -167,10 +170,13 @@ loop's lifecycle. Every hook has exactly one signature, frozen forever:
 def my_hook(ctx: RunContext) -> None: ...
 ```
 
-Hooks run **in place and synchronously** inside `Agent.chat()`, in a fixed
-order. They may inspect or mutate any field of `RunContext` (including the open
-`extras` namespace), may veto a tool call, and may change the system prompt.
-They do one thing: participate in the run.
+Hooks run **in place and synchronously**, in a fixed order. All of them except
+the two agent-boundary hooks (`enter_agent` / `exit_agent`) run inside
+`Agent.chat()`; those two run from the `Agent` lifetime (construction
+`enter_agent`, and `exit_agent` → `enter_agent` on a switch). Every hook may
+inspect or mutate any field of `RunContext` (including the open `extras`
+namespace); the per-turn ones may veto a tool call and change the system
+prompt. They do one thing: participate in the run.
 
 What a hook is **not**:
 
@@ -202,6 +208,37 @@ There is a second way that avoids this line entirely: put a **hook module** in
 the `hook_modules/` folder and it is auto-discovered (see
 ["Promoting experiments"](#promoting-experiments)).
 
+### The full list of hooks (reference)
+
+Every slot at a glance — what fires it, who can trigger it, which agent runs
+it, the `RunContext` fields it touches, its side effects, and a typical use.
+Boundary hooks (top) fire from the `Agent` lifetime (ctor / `set_agent_name`);
+all the rest fire inside `chat()`.
+
+| Hook | What fires it | Who can request it | Runs as | `RunContext` fields involved | Side effects / guarantees | Typical use |
+|------|---------------|--------------------|---------|------------------------------|---------------------------|-------------|
+| `enter_agent` | `Agent(...)` construction (first activation) and on every switch to this agent | `Agent(agent_name=...)`, `set_agent_name()`, `POST /chat agent_name`, `/agent` | incoming agent | `agent_name`(new) | always an agent in place; RAII — pairs with a prior exit except at ctor; fires before that agent's establishment; fires for the main (None) agent too | initialize on takeover: load config, seed per-agent state |
+| `exit_agent` | every switch away from this agent (never at construction) | `set_agent_name()`, `POST /chat agent_name`, `/agent` | outgoing agent | `agent_name`(old) | raises → switch aborts (atomic); never fires at ctor | clean up, persist, release |
+| `initialize_run` | first `chat()`, and again after any switch (once run not established) | core, on need | active agent | may set `run_id` | exactly once per (re)establishment | seed run identity / persistence key |
+| `ready_run` | right after `initialize_run` (run guaranteed) | core, on need | active agent | read `run_id`, `extras` | once per (re)establishment | attach budget / memory |
+| `initialize_session` | first `chat()`, `set_session`, and after any switch | core / caller on session change | active agent | may set `session_id` | on each session (re)establishment | seed / migrate per-session state |
+| `ready_session` | right after `initialize_session` (session guaranteed) | core / caller on session change | active agent | read `session_id`, `extras` | on each session (re)establishment | load per-session external context |
+| `before_llm` | every `tool_loop_round`, before each LLM call | core | active agent | `messages`, `tools`, `system_prompt` | per request only (rebuilt) | inject RAG/context/date, gate tools |
+| `before_tool_call` | every tool call | core | active agent | `tool_call` (may rewrite/`None`) | `None` records a `"skipped by policy"` tool result | rewrite args, veto by policy |
+| `after_tool_call` | after a successful tool exec | core | active agent | `tool_result` | fires only on success | redact / rewrite result |
+| `on_round` | end of each `tool_loop_round` | core | active agent | any (read / `extras`) | fire-only, no required return | tracing / metrics |
+| `prepare` | when `final_answer` is set, before `finish` | core | active agent | `final_answer` | before the answer is recorded to history | validate / normalize |
+| `finish` | last word of the turn | core | active agent | `final_answer` | may rewrite; result recorded to history | transform / add signature |
+
+Rules of thumb:
+
+- **Boundary hooks are per-agent.** `enter_agent` / `exit_agent` run in the
+  *agent that owns the slot*, so each agent's own lifecycle code is isolated.
+- **Everything else is per-active-agent.** Once an agent is on the wheel, all
+  the `chat()`-scope hooks run from its hook set.
+- **Append-only.** All slots default to `None`; adding a slot is a minor
+  change (existing hooks keep working). See ["Rules"](#rules-the-stability-contract).
+
 ### The four levels
 
 A **run** is one instantiation of `Agent` (one conversation driver). It is
@@ -214,6 +251,7 @@ debugging, logging, and future parallel runs — today it is 1:1 with the
 | level           | field             | meaning                                        | set by                                            |
 |-----------------|-------------------|------------------------------------------------|---------------------------------------------------|
 | **run**         | `run_id`          | one `Agent` lifetime                           | caller; else core auto-gens at establishment      |
+| **run**         | `agent_name`      | which hooks subdirectory is active             | caller (ctor or `set_agent_name`); `None` = default |
 | **session**     | `session_id`      | the conversation currently being driven        | caller; else core auto-gens at establishment      |
 | **turn**        | `turn`            | one user message (1-based run counter)         | core                                              |
 | **tool_loop**   | `tool_loop_round` | one LLM→tools iteration within a turn (0-based)| core                                              |
@@ -225,7 +263,7 @@ of fields**, and the core treats them differently:
 
 | | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          |
 |---|----------------------------------------|--------------------------------------------------|
-| fields | `run_id`, `session_id`, `base_prompt`, `system_prompt`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` |
+| fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` |
 | core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round |
 | hook behavior | may read; may write once → the change **persists** ("sticky") until changed again | may read / rewrite *for this request only* |
 
@@ -296,6 +334,7 @@ class RunContext:
     # run-scoped
     run_id: str | None          # established once per run; sticky
     session_id: str | None      # established per active session; sticky
+    agent_name: str | None      # which hooks subdir is active; None = default
     base_prompt: str | None     # immutable for the run — the original system prompt
     system_prompt: str | None   # CURRENT prompt; sticky; hook-editable (see below)
     turn: int                   # core-managed, 1-based, reset by Agent.reset()
@@ -398,6 +437,9 @@ standalone files (never imported *by* the core):
 `agent_seed/hooks.py` is the third, distinct thing: the stable *protocol*
 (`RunContext` + the fixed slots) that both folders plug into.
 
+Subdirectories of `hook_modules/` are *agents* — alternate hook sets selected
+by `agent_name`. See ["Agents: hook subdirectories"](#agents-hook-subdirectories).
+
 ### Promoting experiments
 
 The intended workflow:
@@ -464,10 +506,90 @@ current working directory. In your own test suites, point
 autouse fixture in this repo's `tests/conftest.py`) so a real
 `hook_modules/` can never feed your tests.
 
+### Agents: hook subdirectories
+
+**There is always an agent in place.** The nameless one — the `hook_modules/`
+root, `agent_name=None` — is the **main agent**, not a special case. You can
+define additional, distinct agents by giving each its own subdirectory:
+
+```
+hook_modules/                 the main agent (also the fallback)
+hook_modules/alpha/           alpha's own hooks (used instead of the root)
+hook_modules/gamma/
+```
+
+The rules:
+
+* **Replace, don't merge.** If `agent_name` names a subdirectory
+  (`hook_modules/<agent_name>/`) that exists, *only* that directory is
+  scanned. The root's `*.py` do **not** apply to that agent. The root folder
+  is the **main agent's** hooks and the fallback for any name that has no
+  subdirectory.
+* **Fallback.** An `agent_name` with no matching subdirectory (or `None`)
+  uses the root `hook_modules/`.
+* **Traversal is rejected.** Names that would escape the root (`..`,
+  absolute paths) fall back to the root.
+* **Root location.** The search starts at `hook_modules/` relative to the
+  CWD, or at `$HOOKS_ROOT` if that environment variable is set.
+
+Select an agent at any of these layers:
+
+```python
+agent = Agent(client, registry, agent_name="alpha")   # at construction
+agent.set_agent_name("gamma")                          # later (re-fires establishment)
+agent.agent_name                                        # read it back
+
+# backend:  POST /chat  { "message": "...", "agent_name": "alpha" }
+# frontend: GET /agents  ->  { "agents": ["alpha", "gamma"] }
+```
+
+#### The agent-identity boundary (enter / exit)
+
+Because there is always an agent on the wheel, becoming active and leaving are
+each an **event**. Two boundary hooks bracket every transition — `enter_agent`
+(in the incoming agent's hooks) and `exit_agent` (in the outgoing agent's
+hooks):
+
+```
+construction (first activation)         Agent 1 -> Agent 2              (repeatable)
+┌─ enter_agent(agent 1)                 ┌─ exit_agent(agent 1)   # outgoing
+│   (agent_name = 1; no prior agent)    ├─ [switch committed: agent_name -> 2]
+│                                       ├─ enter_agent(agent 2)   # incoming
+│      (then, on first chat:)           │      (then, on next chat:)
+│   initialize_run · ready_run          │   initialize_run · ready_run
+│   initialize_session · ready_session  │   initialize_session · ready_session
+```
+
+Rules:
+
+* **Always an agent.** First activation fires `enter_agent` only — even for
+  the main (nameless) agent, since there was no prior agent to exit. On
+  *every* switch the order is `exit_agent` (old) → `enter_agent` (new), and
+  then the active agent's establishment hooks re-fire on the next `chat()`.
+* **RAII.** Every agent that takes over after the first one gets exactly one
+  exit when it's displaced. A switch never leaves an agent "half-on."
+* **Atomic.** The incoming agent's hooks are resolved *before* any state is
+  touched, so a broken `hook_modules/<new>/` fails fast and the switch is
+  aborted with **nothing** changed (no `exit`, no `enter`, name unchanged).
+* **Runs as different agents.** `exit_agent` sees `ctx.agent_name` = the
+  *old* value (outgoing); `enter_agent` sees it = the *new* value (incoming).
+* **Scope.** They fire from `Agent.__init__` / `Agent.set_agent_name`, not
+  inside `chat()`. History, `run_id`, `session_id`, and `extras` are not
+  touched by the boundary itself.
+
+This is where **clean-up / persistence** lives: `exit_agent` persists or
+releases what the agent you're leaving needs, `enter_agent` initializes what
+the agent you're taking over needs. Selecting an agent (via
+`set_agent_name(...)`, `POST /chat`'s `agent_name`, or `/agent`) re-resolves
+`Agent.hooks` (an explicit `Hooks(...)` from construction always wins) and
+re-fires establishment on the next `chat()`, mirroring `set_session`.
+
 ### Which hook to use, by goal
 
 | goal                                          | hook                | how |
 |-----------------------------------------------|---------------------|-----|
+| clean up / persist state when an agent is displaced | `exit_agent`    | runs as the outgoing agent; `ctx.agent_name` = old value (RAII pair with `enter_agent`) |
+| initialize state when an agent takes over     | `enter_agent`       | runs as the incoming agent; `ctx.agent_name` = new value; fires on construction too |
 | override / extend / patch the system prompt   | `before_llm`        | read `ctx.base_prompt` + set `ctx.system_prompt` (sticky) |
 | inject RAG / context / date into the next LLM call only | `before_llm` | append to `ctx.messages` (per-request — history is not touched) |
 | disable tools for one call                      | `before_llm`        | `ctx.tools.clear()` |
@@ -603,7 +725,13 @@ Breaking any of these is a **major** change.
 9. **Hooks are synchronous.** The agent loop runs in a worker thread; async
    hooks are out of scope.
 10. **Establishment fires on need.** Run hooks strictly once; session hooks on
-    each (re)establishment. Do not assume establishment fires every `chat()`.
+     each (re)establishment. Do not assume establishment fires every `chat()`.
+11. **The agent boundary is RAII and atomic.** There is always an agent in
+     place (the main one when `agent_name` is `None`). `enter_agent` fires on
+     first activation and on every incoming switch; `exit_agent` on every
+     outgoing switch, never at construction. A switch resolves the new hooks
+     first, so a broken target aborts cleanly — nothing is half-committed and
+     `exit_agent` is not fired for a switch that didn't happen.
 
 ### Extending the core with new slots
 
@@ -633,6 +761,13 @@ A: Check these in order:
    default search is relative to the current working directory.
 4. You didn't pass an explicit `Hooks(...)` to `Agent` or `create_app` — an
    explicit value fully replaces discovery.
+
+**Q: I put a hook in `hook_modules/agent/foo.py` — is it loaded?**
+A: Not by default. Subdirectories of `hook_modules/` are *agents*: they are
+loaded only when that agent is selected (i.e. `agent_name` = the directory
+name) — the default agent is the `hook_modules/` root, so the subdirectory is
+inert until you ask for it. See
+["Agents: hook subdirectories"](#agents-hook-subdirectories).
 
 **Q: I wrote two hooks for the same slot. Which one runs?**
 A: Exactly one. Discovered modules merge alphabetically and the file that
@@ -699,6 +834,11 @@ the in-memory map.
 
 ## Glossary
 
+- **agent** — an active hook set. There is always an agent on the wheel: the
+  **main agent** is the nameless `hook_modules/` root (`agent_name=None`); a
+  named agent is a subdirectory `hook_modules/<agent_name>/` selected via
+  `agent_name`. Selecting an agent brackets the boundary hooks and re-fires
+  establishment.
 - **agent loop** — the `Agent.chat()` cycle: send the message + tool schemas to
   the LLM, run any tool calls the LLM returned, and repeat until it returns
   plain text.
@@ -710,6 +850,14 @@ the in-memory map.
 - **establishment** — the one-time (per run) or per-session (per session)
   sequence of hooks that set up `run_id`, `session_id`, and any derived state.
   Fires on need, not every turn.
+- **enter_agent / exit_agent** — the agent-identity boundary hooks. `enter_agent`
+  fires when an agent becomes active (first activation + each incoming switch;
+  runs as the incoming agent); `exit_agent` when an agent is displaced (each
+  outgoing switch, never at construction; runs as the outgoing agent). A switch
+  is atomic: `exit` → commit → `enter`.
+- **main agent** — the nameless agent backed by the `hook_modules/` root
+  (`agent_name=None`). The default and the agent on the wheel until one is
+  selected; "no agent" is not a state.
 - **extras** — `ctx.extras`: a flat dict owned by hooks. The core never reads
   or writes it. Survives across turns and `Agent.reset()`.
 - **hook** — a `(ctx: RunContext) -> None` function attached to a fixed slot in
@@ -726,8 +874,8 @@ the in-memory map.
 - **run** — one instantiation of `Agent`. Synchronous, single-user, owns one
   `RunContext` for its whole life.
 - **run-scoped fields** — the `RunContext` fields (`run_id`, `session_id`,
-  `base_prompt`, `system_prompt`, `turn`, `usage`, `extras`) that persist
-  across turns.
+  `agent_name`, `base_prompt`, `system_prompt`, `turn`, `usage`, `extras`)
+  that persist across turns.
 - **session** — the active conversation within a run. A run can switch
   sessions; it never runs two at once.
 - **sticky** — a run-scoped field's value persists to the next turn until

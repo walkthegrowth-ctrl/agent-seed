@@ -71,6 +71,7 @@ class Session:
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.session_id = uuid.uuid4().hex
+        self.agent_name: str | None = None
         self.client = httpx.Client(timeout=timeout)
 
     # -- backend calls ------------------------------------------------------
@@ -89,6 +90,14 @@ class Session:
         response.raise_for_status()
         return response.json().get("names", [])
 
+    def agents(self) -> list[str]:
+        response = self.client.get(f"{self.url}/agents")
+        response.raise_for_status()
+        return response.json().get("agents", [])
+
+    def set_agent(self, name: str | None) -> None:
+        self.agent_name = name
+
     def model(self) -> dict[str, Any] | None:
         # Best-effort: not exposed by the API contract in v0; REPL shows it
         # only when the backend adds a /config endpoint.
@@ -101,11 +110,10 @@ class Session:
         return None
 
     def chat_stream(self, message: str) -> Iterator[tuple[str, dict[str, Any]]]:
-        with self.client.stream(
-            "POST",
-            f"{self.url}/chat",
-            json={"session_id": self.session_id, "message": message},
-        ) as response:
+        payload: dict[str, Any] = {"session_id": self.session_id, "message": message}
+        if self.agent_name is not None:
+            payload["agent_name"] = self.agent_name
+        with self.client.stream("POST", f"{self.url}/chat", json=payload) as response:
             if response.status_code != 200:
                 body = response.read().decode("utf-8", "replace")
                 raise httpx.HTTPStatusError(
@@ -137,6 +145,8 @@ def render_tool_event(console: Console, name: str, arguments: Any, result: Any) 
 HELP = """[bold]commands[/]
   /help        show this help
   /reset       start a new session (clears server-side history)
+  /agent [n]   set the agent (a hooks subdirectory); no arg shows current
+  /agents      list discoverable agent names from the backend
   /tools       list tools registered on the backend
   /model       show backend LLM config (if the backend exposes /config)
   /quit        exit
@@ -173,6 +183,7 @@ class Repl:
         banner = Panel.fit(
             "[bold]agent-seed[/] REPL\n"
             f"backend: [cyan]{self.url}[/]\n"
+            "agent: [cyan](default)[/]\n"
             "[dim]type /help for commands, /quit to exit[/]\n"
             "[dim]type / alone to open a multi-line block[/]",
             border_style="cyan",
@@ -282,6 +293,21 @@ class Repl:
         if cmd == "/reset":
             session.reset()
             CONSOLE.print("[dim]session reset[/]")
+            return True
+        if cmd == "/agent":
+            parts = text.split(None, 1)
+            if len(parts) < 2:
+                CONSOLE.print(f"agent: [bold cyan]{session.agent_name or '(default)'}[/]")
+            else:
+                session.set_agent(parts[1].strip() or None)
+                CONSOLE.print(f"agent: [bold cyan]{session.agent_name or '(default)'}[/]")
+            return True
+        if cmd == "/agents":
+            names = session.agents()
+            if not names:
+                CONSOLE.print("[dim]no discoverable agents on the backend[/]")
+            else:
+                CONSOLE.print("[bold]agents:[/] " + ", ".join(names))
             return True
         if cmd == "/tools":
             names = session.tools_names()

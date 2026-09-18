@@ -448,6 +448,8 @@ def test_no_hooks_configured_behaves_exactly_as_before():
 def test_hooks_default_hooks_dataclass_is_empty():
     h = Hooks()
     for name in (
+        "enter_agent",
+        "exit_agent",
         "initialize_run",
         "ready_run",
         "initialize_session",
@@ -466,6 +468,7 @@ def test_run_context_fields_have_sane_defaults():
     ctx = RunContext()
     assert ctx.run_id is None
     assert ctx.session_id is None
+    assert ctx.agent_name is None
     assert ctx.turn == 0
     assert ctx.tool_loop_round == 0
     assert ctx.base_prompt is None

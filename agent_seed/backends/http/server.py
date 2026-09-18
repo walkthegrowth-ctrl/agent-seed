@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from ... import __version__
 from ...core import Agent
+from ...discovery import list_agents
 from ...hooks import Hooks
 from ...llm import LLMConfig, LLMConfigError, OpenAICompatClient
 from ...tools import ToolRegistry
@@ -28,6 +29,7 @@ from ...tools import registry as default_registry
 class ChatRequest(BaseModel):
     message: str
     session_id: str | None = None
+    agent_name: str | None = None
 
 
 class SessionRequest(BaseModel):
@@ -46,7 +48,7 @@ class SessionStore:
         self._registry = registry
         self._hooks = hooks
 
-    def get(self, session_id: str | None) -> tuple[str, Agent]:
+    def get(self, session_id: str | None, agent_name: str | None = None) -> tuple[str, Agent]:
         session_id = session_id or uuid.uuid4().hex
         agent = self._agents.get(session_id)
         if agent is None:
@@ -59,8 +61,13 @@ class SessionStore:
                 hooks=self._hooks,
                 run_id=uuid.uuid4().hex,
                 session_id=session_id,
+                agent_name=agent_name,
             )
             self._agents[session_id] = agent
+        elif agent_name is not None and agent.agent_name != agent_name:
+            # The caller switched agents mid-session: re-resolve hooks and
+            # let the establishment hooks re-fire on the next turn.
+            agent.set_agent_name(agent_name)
         return session_id, agent
 
     def reset(self, session_id: str) -> None:
@@ -108,6 +115,11 @@ def create_app(
     def tools() -> dict[str, Any]:
         return {"tools": registry.schemas(), "names": registry.names()}
 
+    @app.get("/agents")
+    def agents() -> dict[str, Any]:
+        """List discoverable agent names (subdirs of the hooks root)."""
+        return {"agents": list_agents()}
+
     @app.post("/reset")
     def reset(body: SessionRequest) -> dict[str, Any]:
         sessions.reset(body.session_id)
@@ -116,7 +128,7 @@ def create_app(
     @app.post("/chat")
     async def chat(request: ChatRequest):
         try:
-            session_id, agent = sessions.get(request.session_id)
+            session_id, agent = sessions.get(request.session_id, request.agent_name)
         except LLMConfigError as exc:
             return JSONResponse({"error": str(exc)}, status_code=500)
 

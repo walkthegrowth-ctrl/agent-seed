@@ -48,7 +48,7 @@ request.
 |------|----------------|
 | `agent_seed/core.py` | `Agent`: history, tool loop, round-trip cap. Talks to LLM + registry. No I/O besides the two interfaces it is given. |
 | `agent_seed/hooks.py` | `Hooks` + `RunContext`: the stable, extensible point of the core. See `manual.md`. |
-| `agent_seed/discovery.py` | Auto-loads promoted hook modules from `hook_modules/` (once per process, cached; fail-fast). |
+| `agent_seed/discovery.py` | Auto-loads promoted hook modules from `hook_modules/` (once per process, cached; fail-fast). Resolves an `agent_name` to a subdirectory (`hook_modules/<name>/`) with the root as the default. |
 | `agent_seed/llm.py` | `OpenAICompatClient`: streaming `POST /chat/completions`, SSE line parsing, chunk folding. `LLMConfig.from_env`. |
 | `agent_seed/tools.py` | `ToolRegistry`, `@tool`, JSON-schema generation from annotations, and the starter `calculator`. |
 | `agent_seed/backends/http/server.py` | FastAPI app, session store, `POST /chat` SSE, `/tools`, `/config`, `/health`, `/reset`. |
@@ -92,3 +92,8 @@ no auth, single-user by design — see below.
   `def make() -> Hooks` file) into `hook_modules/` to auto-load it in every
   `Agent`. Prototype in `experiments/` first — never auto-loaded. No core
   changes needed.
+- A different *agent* (a distinct hook set) → put its modules in
+  `hook_modules/<agent_name>/` and select it with `Agent(agent_name=...)`,
+  `Agent.set_agent_name(...)`, or the `agent_name` field on `POST /chat`
+  (see `protocol.md`, `manual.md`). The root `hook_modules/` is the default
+  agent; a subdirectory replaces the root's hooks for that agent.

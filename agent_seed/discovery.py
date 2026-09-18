@@ -21,6 +21,7 @@ Nothing is half-merged.
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from collections.abc import Callable
 from dataclasses import fields
@@ -51,6 +52,46 @@ def get_hooks(folder: str | Path | None = None) -> Hooks:
     if key not in _CACHE:
         _CACHE[key] = discover(key)
     return _CACHE[key]
+
+
+def _root_folder() -> Path:
+    """The hooks root: ``$HOOKS_ROOT`` if set, else ``hook_modules`` (CWD)."""
+    env = os.environ.get("HOOKS_ROOT")
+    return Path(env) if env else Path(DEFAULT_HOOKS_FOLDER)
+
+
+def resolve_hooks_folder(agent_name: str | None = None) -> Path:
+    """Map ``agent_name`` to a hooks folder.
+
+    If ``agent_name`` names a subdirectory of the root (``hook_modules/<name>``)
+    that directory is returned. Otherwise the root itself is returned (the
+    "default agent"). Traversal (``..``) and names escaping the root are
+    rejected and fall back to the root.
+    """
+    root = _root_folder()
+    root_resolved = root.resolve()
+    if agent_name:
+        candidate = root_resolved / agent_name
+        try:
+            real = candidate.resolve()
+            if real.parent == root_resolved and real.is_dir():
+                return real
+        except (OSError, RuntimeError):  # broken symlinks / weird OS errors
+            pass
+    return root_resolved
+
+
+def get_hooks_for_agent(agent_name: str | None = None) -> Hooks:
+    """The merged hooks for ``agent_name`` (root folder when ``None``), cached."""
+    return get_hooks(resolve_hooks_folder(agent_name))
+
+
+def list_agents() -> list[str]:
+    """Names of subdirectories of the root (potential ``agent_name`` values)."""
+    root = _root_folder()
+    if not root.is_dir():
+        return []
+    return sorted(d.name for d in root.iterdir() if d.is_dir() and d.name != "__pycache__")
 
 
 def discover(folder: Path) -> Hooks:

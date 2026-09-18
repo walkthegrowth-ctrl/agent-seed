@@ -10,16 +10,19 @@ Two things are defined here:
 
   Hooks run in-place, synchronously, in the order shown by the core loop.
   They may inspect or mutate any field of :class:`RunContext` (including
-  the open ``extras`` namespace), and may veto a tool call.
+  the open ``extras`` namespace), and may veto a tool call. There are two
+  agent-boundary hooks — ``enter_agent`` / ``exit_agent`` — that run from
+  the ``Agent`` lifetime (construction/switch) rather than inside
+  ``chat()``; the rest run inside ``chat()`` in the listed order.
 
 * :class:`RunContext` — the single shared object owned by one run (one
   ``Agent``, one ``RunContext``), passed to every hook. It has two
   lifetimes:
 
   - *run-scoped* fields persist across turns (and survive ``reset()``):
-    ``run_id``, ``session_id``, ``turn``, ``base_prompt`` (immutable),
-    ``system_prompt`` (sticky — a hook change holds until changed again),
-    cumulative ``usage``, and ``extras``.
+    ``run_id``, ``session_id``, ``agent_name``, ``turn``, ``base_prompt``
+    (immutable), ``system_prompt`` (sticky — a hook change holds until
+    changed again), cumulative ``usage``, and ``extras``.
   - *per-request* fields are rebuilt by the core on each LLM call:
     ``messages``, ``tools``, ``tool_loop_round``; and *per-call* fields set
     for each tool call: ``tool_call``, ``tool_result``, ``final_answer``.
@@ -56,8 +59,10 @@ class RunContext:
     Ownership is explicit per field (also listed in ``docs/manual.md``):
 
     * Core-managed — set by the core; hooks may read, most may modify.
-    * Caller-supplied — optional ids the caller may pre-fill; the core
-      auto-generates if left ``None`` by end of the *initialize* phase.
+    * Caller-supplied — optional ids the caller may pre-fill (``run_id``,
+      ``session_id``, ``agent_name``); the core auto-generates the ids if
+      left ``None`` by end of the *initialize* phase. ``agent_name`` has no
+      auto-generation: ``None`` means the default (root) hooks.
     * Hook-owned — the ``extras`` namespace is a wall: the core never
       reads or writes it; hooks own it (flat keys).
     """
@@ -69,6 +74,15 @@ class RunContext:
     # The session hooks re-fire whenever the active session changes.
     run_id: str | None = None
     session_id: str | None = None
+
+    # -- agent identity (run-scoped, sticky) ---------------------------------
+    # Identifies which agent (hooks subdirectory) is active:
+    # hook_modules/<agent_name>/, or the hook_modules/ root when None.
+    # There is always an agent in place — the nameless one (None) is the main
+    # agent, not a special case. Caller-supplied via Agent(agent_name=...) or
+    # Agent.set_agent_name(). On a switch the enter/exit boundary hooks and
+    # the establishment hooks re-fire.
+    agent_name: str | None = None
 
     # -- system prompt (run-scoped) ------------------------------------------
     # base_prompt: the prompt established for the run; immutable after
@@ -102,7 +116,22 @@ class Hooks:
 
     All slots share the signature ``(ctx: RunContext) -> None``. All slots
     default to ``None`` — a hook that is not set simply does not run.
+
+    ``enter_agent`` / ``exit_agent`` are the agent-identity boundary hooks:
+    they fire from ``Agent.__init__`` / ``Agent.set_agent_name`` (not in
+    ``chat()``) to bracket each agent becoming active / leaving. The remaining
+    slots fire inside ``chat()`` in the order they are listed.
     """
+
+    # Agent-identity boundary (meta-level; fire in the Agent ctor /
+    # set_agent_name, NOT in chat()). There is always an agent in place: the
+    # nameless one (agent_name=None, the hook_modules/ root) is the main
+    # agent. enter_agent fires every time an agent becomes active (at
+    # construction, even for the main agent, and as the incoming agent on a
+    # switch); exit_agent fires when an agent is displaced (the outgoing
+    # agent) — never at construction. On a switch: exit(old) -> enter(new).
+    enter_agent: Hook | None = None  # incoming agent takes over; ctx.agent_name = NEW value
+    exit_agent: Hook | None = None  # outgoing agent leaves; ctx.agent_name = OLD value
 
     # Identity establishment (run before session, in this order).
     initialize_run: Hook | None = None  # may set ctx.run_id
