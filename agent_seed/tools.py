@@ -142,6 +142,22 @@ class ToolRegistry:
     def schemas(self) -> list[dict[str, Any]]:
         return [spec.schema for spec in self._tools.values()]
 
+    def has(self, name: str) -> bool:
+        """True if a tool with ``name`` is registered."""
+        return name in self._tools
+
+    def schemas_for(self, names: list[str] | None) -> list[dict[str, Any]]:
+        """Schemas for the names in ``names`` (None or empty -> []).
+
+        Registration order is preserved. Names that are not registered are
+        ignored (they simply do not exist to offer). This is the tool-policy
+        filter the core applies against ``ctx.allowed_tools``: a strict
+        whitelist — whatever is not named is neither offered nor callable.
+        """
+        if not names:
+            return []
+        return [spec.schema for spec in self._tools.values() if spec.name in names]
+
     def call(self, name: str, arguments: dict[str, Any]) -> Any:
         spec = self._tools.get(name)
         if spec is None:

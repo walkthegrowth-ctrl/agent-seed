@@ -22,6 +22,7 @@ Two things are defined here:
   - *run-scoped* fields persist across turns (and survive ``reset()``):
     ``run_id``, ``session_id``, ``agent_name``, ``turn``, ``base_prompt``
     (immutable), ``system_prompt`` (sticky — a hook change holds until
+    changed again), ``allowed_tools`` (sticky — a hook change holds until
     changed again), cumulative ``usage``, and ``extras``.
   - *per-request* fields are rebuilt by the core on each LLM call:
     ``messages``, ``tools``, ``tool_loop_round``.
@@ -94,6 +95,17 @@ class RunContext:
     # across turns) until changed again. See "System prompt (dynamic)".
     base_prompt: str | None = None
     system_prompt: str | None = None
+
+    # -- tool policy (run-scoped, sticky) ------------------------------------
+    # The whitelist of tool names this run may OFFER to the LLM and CALL.
+    # Owned by the active agent: an agent's enter_agent (or before_llm) sets
+    # it, the core reads it to (a) filter the offered schemas and (b) veto
+    # any call to a name outside it. None or [] is the default and means NO
+    # tools — tooling is opt-in per agent. The core resets this to None at
+    # each agent switch (before the incoming agent's hooks fire) so a
+    # switched-to agent that declares no set genuinely sees no tools. Sticky
+    # like system_prompt: a change holds across turns until changed again.
+    allowed_tools: list[str] | None = None
 
     # -- core-managed counters -----------------------------------------------
     turn: int = 0  # user messages in this run (1-based; the core increments)

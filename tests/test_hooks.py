@@ -22,15 +22,34 @@ def _agent(
     session_id: str | None = None,
     system_prompt: str | None = None,
 ) -> tuple[Agent, FakeLLMClient]:
-    """Build an Agent with the calculator tool and a scripted LLM client."""
+    """Build an Agent with the calculator tool and a scripted LLM client.
+
+    Under strict tool-whitelist policy this helper pins ``ctx.allowed_tools``
+    to the whole registry at construction so existing tests that exercise
+    tool execution keep working as before. Tests that want NO tools (or a
+    specific subset) can override ``enter_agent`` in ``hooks``.
+    """
     registry = ToolRegistry()
     registry.register(calculator)
     client = FakeLLMClient(script)
+
+    from dataclasses import replace
+
+    def _allow_all_tools(ctx: RunContext) -> None:
+        ctx.allowed_tools = list(registry.names())
+
+    if hooks is None:
+        effective = Hooks(enter_agent=_allow_all_tools)
+    elif hooks.enter_agent is None:
+        effective = replace(hooks, enter_agent=_allow_all_tools)
+    else:
+        effective = hooks
+
     agent = Agent(
         client,
         registry,
         system_prompt=DEFAULT_SYSTEM_PROMPT if system_prompt is None else system_prompt,
-        hooks=hooks or Hooks(),
+        hooks=effective,
         run_id=run_id,
         session_id=session_id,
     )

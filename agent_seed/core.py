@@ -186,6 +186,12 @@ class Agent:
         self._context.agent_name = agent_name
         if not self._hooks_explicit:
             self.hooks = new_hooks
+        # A fresh agent starts with NO tools. The incoming agent's hooks
+        # (enter_agent / before_llm) decide the whitelist from here on; an
+        # agent that does not set allowed_tools offers nothing. This reset
+        # prevents the outgoing agent's sticky value from leaking across the
+        # shared RunContext.
+        self._context.allowed_tools = None
         # Incoming agent takes the wheel.
         if self.hooks.enter_agent is not None:
             self.hooks.enter_agent(self._context)
@@ -264,7 +270,12 @@ class Agent:
             # see ``docs/manual.md``, "System prompt (dynamic)".
             ctx.messages = [{"role": "system", "content": ctx.system_prompt or ""}]
             ctx.messages.extend(self.history)
-            ctx.tools = self.registry.schemas()
+            # Offer only what the active agent's whitelist allows (strict).
+            # None/[] -> no tools offered. ``before_llm`` may still adjust
+            # ``ctx.tools`` afterwards (existing escape hatch) or change
+            # ``ctx.allowed_tools`` (carries to the next round and governs
+            # the execute-path veto) — see ``docs/manual.md``.
+            ctx.tools = self.registry.schemas_for(ctx.allowed_tools)
             call_hook(self.hooks.before_llm)
             # A hook may have set a new system_prompt; apply it to the
             # first (system) message. If the hook already edited messages[0]
@@ -303,24 +314,36 @@ class Agent:
                 }
             )
 
+            allowed_now = ctx.allowed_tools or []
             for call in completion.tool_calls:
                 call_name = call.name
                 call_args = call.arguments
                 vetoed = False
-                ctx.tool_call = {"name": call.name, "arguments": call.arguments}
-                call_hook(self.hooks.before_tool_call)
-                if ctx.tool_call is None:
+                # Core tool-policy gate: the active agent's whitelist is a
+                # hard boundary, enforced BEFORE before_tool_call (a hook
+                # can narrow or rewrite a call, but cannot re-allow a name
+                # the agent did not whitelist — strict semantics). The
+                # core records a well-formed tool result so the next LLM
+                # call stays valid. (Hooks' ``before_tool_call`` veto is
+                # a separate, later gate for hook-level policy.)
+                if call.name not in allowed_now:
                     vetoed = True
-                    content = f"error: tool '{call.name}' skipped by policy"
+                    content = f"error: tool '{call.name}' not available to this agent"
                 else:
-                    call_name = ctx.tool_call["name"]
-                    call_args = ctx.tool_call["arguments"]
-                    try:
-                        ctx.tool_result = self.registry.call(call_name, call_args)
-                        content = str(ctx.tool_result)
-                    except (ToolError, TypeError) as exc:
-                        ctx.tool_result = None
-                        content = f"error: {exc}"
+                    ctx.tool_call = {"name": call.name, "arguments": call.arguments}
+                    call_hook(self.hooks.before_tool_call)
+                    if ctx.tool_call is None:
+                        vetoed = True
+                        content = f"error: tool '{call.name}' skipped by policy"
+                    else:
+                        call_name = ctx.tool_call["name"]
+                        call_args = ctx.tool_call["arguments"]
+                        try:
+                            ctx.tool_result = self.registry.call(call_name, call_args)
+                            content = str(ctx.tool_result)
+                        except (ToolError, TypeError) as exc:
+                            ctx.tool_result = None
+                            content = f"error: {exc}"
                 if not vetoed:
                     call_hook(self.hooks.after_tool_call)
                     if ctx.tool_result is not None:

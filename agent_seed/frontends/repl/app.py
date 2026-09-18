@@ -81,12 +81,14 @@ class Session:
         self.session_id = uuid.uuid4().hex
 
     def tools(self) -> list[dict[str, Any]]:
-        response = self.client.get(f"{self.url}/tools")
+        params = {"agent_name": self.agent_name} if self.agent_name is not None else None
+        response = self.client.get(f"{self.url}/tools", params=params)
         response.raise_for_status()
         return response.json().get("tools", [])
 
     def tools_names(self) -> list[str]:
-        response = self.client.get(f"{self.url}/tools")
+        params = {"agent_name": self.agent_name} if self.agent_name is not None else None
+        response = self.client.get(f"{self.url}/tools", params=params)
         response.raise_for_status()
         return response.json().get("names", [])
 

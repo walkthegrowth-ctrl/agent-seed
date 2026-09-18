@@ -29,8 +29,13 @@ def _events(raw_text):
     return events
 
 
-def _make_app(script):
-    """Build the real app with a mocked LLM client that pops scripted completions."""
+def _make_app(script, hooks=None):
+    """Build the real app with a mocked LLM client that pops scripted completions.
+
+    Under strict tool-whitelist policy, ``hooks`` (if provided) must include an
+    ``enter_agent`` that sets ``ctx.allowed_tools``; otherwise the agent offers
+    no tools.
+    """
     from agent_seed.llm import Completion  # noqa: F401 - ensure import path works
 
     def fake_client_factory(cfg):
@@ -49,19 +54,25 @@ def _make_app(script):
 
     registry = ToolRegistry()
     registry.register(calculator)
-    app = server.create_app(registry)
+    app = server.create_app(registry, hooks=hooks)
     return app, registry, monkeypatch
 
 
 @pytest.fixture
 def tool_client(monkeypatch):
+    from agent_seed.hooks import Hooks, RunContext
     from tests.conftest import text_completion, tool_completion
 
+    # Strict tool-whitelist policy: declare `calculator` for the agent.
+    def _enter(ctx: RunContext) -> None:
+        ctx.allowed_tools = ["calculator"]
+
+    hooks = Hooks(enter_agent=_enter)
     script = [
         tool_completion("calculator", {"expression": "6 * 7"}),
         text_completion("42.0"),
     ]
-    app, registry, mp = _make_app(script)
+    app, registry, mp = _make_app(script, hooks=hooks)
     with TestClient(app) as test_client:
         yield test_client, registry
     mp.undo()
@@ -83,6 +94,41 @@ def test_tools_endpoint(tool_client):
     body = response.json()
     assert body["names"] == ["calculator"]
     assert body["tools"][0]["function"]["name"] == "calculator"
+
+
+def test_tools_endpoint_agent_name_reflects_whitelist(monkeypatch, tmp_path):
+    from agent_seed.discovery import reset_cache
+
+    hooks_root = tmp_path / "hook_modules"
+    (hooks_root / "alpha").mkdir(parents=True)
+    (hooks_root / "alpha" / "a.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
+        "def make() -> Hooks:\n    return Hooks(enter_agent=enter_agent)\n"
+    )
+    (hooks_root / "bare").mkdir()
+    (hooks_root / "bare" / "b.py").write_text(
+        "from agent_seed.hooks import Hooks\ndef make() -> Hooks:\n    return Hooks()\n"
+    )
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(hooks_root))
+    reset_cache()
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+    app = server.create_app(registry)
+    with TestClient(app) as test_client:
+        # no agent_name: the whole catalog
+        full = test_client.get("/tools").json()
+        assert full["names"] == ["calculator"]
+        # alpha whitelists calculator
+        alpha = test_client.get("/tools", params={"agent_name": "alpha"}).json()
+        assert alpha["names"] == ["calculator"]
+        # bare declares none -> strict policy: no tools
+        bare = test_client.get("/tools", params={"agent_name": "bare"}).json()
+        assert bare == {"tools": [], "names": []}
+        # unknown agent -> falls back to the root hooks (none) -> no tools
+        unknown = test_client.get("/tools", params={"agent_name": "nope"}).json()
+        assert unknown == {"tools": [], "names": []}
 
 
 def test_chat_streams_tool_then_token_then_done(tool_client):
@@ -146,15 +192,21 @@ def test_chat_agent_name_selects_subdir_hooks(monkeypatch, tmp_path):
     # wire and we can assert which folder's hook ran.
     hooks_root = tmp_path / "hook_modules"
     (hooks_root / "alpha").mkdir(parents=True)
+    # alpha whitelists calculator AND rewrites the result (x100)
     (hooks_root / "alpha" / "a.py").write_text(
         "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
         "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 100\n"
-        "def make() -> Hooks:\n    return Hooks(after_tool_call=after_tool_call)\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent, after_tool_call=after_tool_call)\n"
     )
+    # root whitelists calculator AND rewrites the result (x1000)
     (hooks_root / "root.py").write_text(
         "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
         "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 1000\n"
-        "def make() -> Hooks:\n    return Hooks(after_tool_call=after_tool_call)\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent, after_tool_call=after_tool_call)\n"
     )
 
     monkeypatch.setenv("LLM_MODEL", "test-model")

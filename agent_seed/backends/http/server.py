@@ -6,6 +6,8 @@ Wire format (see docs/protocol.md):
     GET  /config  -> server-side LLM config (llm | null)
     GET  /health  -> {"status": "ok", "version": ...}
     GET  /tools   -> tool schemas (OpenAI function form) + names
+                       (with ?agent_name=<n>: only the tools that agent's
+                       whitelist allows; without: the whole catalog)
     POST /reset   body {"session_id"} -> clears that session's history
 """
 
@@ -22,8 +24,8 @@ from pydantic import BaseModel
 
 from ... import __version__
 from ...core import Agent
-from ...discovery import list_agents
-from ...hooks import Hooks
+from ...discovery import get_hooks_for_agent, list_agents
+from ...hooks import Hooks, RunContext
 from ...llm import LLMConfig, LLMConfigError, OpenAICompatClient
 from ...tools import ToolRegistry
 from ...tools import registry as default_registry
@@ -115,8 +117,26 @@ def create_app(
         }
 
     @app.get("/tools")
-    def tools() -> dict[str, Any]:
-        return {"tools": registry.schemas(), "names": registry.names()}
+    def tools(agent_name: str | None = None) -> dict[str, Any]:
+        # Without agent_name: the whole catalog (what any agent COULD see —
+        # useful for inventory / UI, not a live session's toolset).
+        # With agent_name: only the tools that agent's whitelist allows.
+        # We learn the declared set by running the agent's enter_agent hook
+        # against a scratch RunContext (strict policy: None -> no tools).
+        if agent_name is None:
+            return {"tools": registry.schemas(), "names": registry.names()}
+        hooks = get_hooks_for_agent(agent_name)
+        allowed: list[str] | None = None
+        if hooks is not None and hooks.enter_agent is not None:
+            ctx = RunContext(agent_name=agent_name)
+            hooks.enter_agent(ctx)
+            allowed = ctx.allowed_tools
+        if not allowed:  # None or [] -> this agent offers NO tools
+            return {"tools": [], "names": []}
+        return {
+            "tools": registry.schemas_for(allowed),
+            "names": allowed,
+        }
 
     @app.get("/agents")
     def agents() -> dict[str, Any]:

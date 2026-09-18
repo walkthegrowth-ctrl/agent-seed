@@ -37,6 +37,18 @@ backend. If you build a new frontend, this is the only spec you need.
 
 `200`
 
+Optional query parameter:
+
+- `agent_name` (string) — restrict the listing to the tools **that agent's
+  whitelist allows** (resolved via `hook_modules/<agent_name>/`, falling back
+  to `hook_modules/`). An agent that declares no tool set (no `enter_agent` /
+  no `ctx.allowed_tools`) returns `{"tools": [], "names": []}`. Strict
+  policy: an omitted set is *zero tools*, not *all tools*.
+
+Without `agent_name`, the whole tool catalog (the union of every registered
+tool) is returned. This is a *catalog* endpoint — it is not a live session
+snapshot and does not mutate hook state.
+
 ```json
 {
   "tools": [
@@ -58,6 +70,7 @@ backend. If you build a new frontend, this is the only spec you need.
 ```
 
 `tools` is in OpenAI function-calling schema form, ready to be forwarded.
+`names` is the list of `tools[i].function.name`.
 
 ## `GET /agents`
 

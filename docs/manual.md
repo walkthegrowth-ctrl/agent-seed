@@ -39,6 +39,7 @@ Companion documents:
     - [Overriding discovery](#overriding-discovery)
   - [Agents: hook subdirectories](#agents-hook-subdirectories)
     - [Your first agent (end to end)](#your-first-agent-end-to-end)
+    - [Per-agent tool access (strict whitelist)](#per-agent-tool-access-strict-whitelist)
     - [The agent-identity boundary (enter / exit)](#the-agent-identity-boundary-enter--exit)
   - [Which hook to use, by goal](#which-hook-to-use-by-goal)
   - [Worked examples](#worked-examples)
@@ -124,6 +125,12 @@ app = create_app(registry)
 
 The REPL/protocol does not change — `GET /tools` and tool calling both reflect
 whatever registry the app was created with.
+
+> **Registration ≠ availability.** A tool *registered* in the registry is only
+> one step: under the **strict tool-whitelist policy** each agent must also
+> *declare* which tools it may use via `ctx.allowed_tools` (in its
+> `enter_agent` hook), or it offers **no** tools and rejects every tool call.
+> See ["Per-agent tool access (strict whitelist)"](#per-agent-tool-access-strict-whitelist).
 
 ### Conventions &amp; gotchas
 
@@ -281,15 +288,16 @@ lifetimes** for its fields, and the core treats each differently:
 
 | | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          |
 |---|----------------------------------------|--------------------------------------------------|
-| fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` |
+| fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` |
 | core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round |
 | hook behavior | may read; may write once → the change **persists** ("sticky") until changed again | may read / rewrite *for this request only* |
 
 Consequences a hook can rely on:
 
-- `ctx.session_id`, `ctx.system_prompt`, and anything you put in `ctx.extras`
-  **survive to the next turn** and survive `Agent.reset()`. That's the whole
-  "sticky" story — you do not re-assert a changed value each turn.
+- `ctx.session_id`, `ctx.system_prompt`, `ctx.allowed_tools`, and anything you
+  put in `ctx.extras` **survive to the next turn** and survive
+  `Agent.reset()`. That's the whole "sticky" story — you do not re-assert a
+  changed value each turn.
 - `ctx.messages`, `ctx.tools`, `ctx.tool_loop_round` are **rebuilt** before
   each `before_llm`. Do not rely on what you saw last request; recompute it.
 - `ctx.usage` accumulates across the run.
@@ -315,17 +323,23 @@ Then for each `chat()` turn:
 
 ```
 chat() begins  (turn N of the run)
-┌─ per tool_loop_round (0 .. MAX_TOOL_ROUNDS-1), until the LLM answers:
-│   [core rebuilds ctx.messages from ctx.system_prompt + history;
-│    rebuilds ctx.tools; sets ctx.tool_loop_round]
-│   ├─ before_llm(ctx)               # may rewrite ctx.messages / ctx.tools / ctx.system_prompt
-│   [core applies ctx.system_prompt to messages[0]; sends the LLM request]
-│   │   if the LLM returns tool_calls:
-│   │     └─ per tool call:
-│   │         ├─ before_tool_call(ctx)     # rewrite ctx.tool_call or veto with None
-│   │         ├─ [core executes the tool]
-│   │         └─ after_tool_call(ctx)      # rewrite ctx.tool_result
-│   │   [core appends history entries]
+ ┌─ per tool_loop_round (0 .. MAX_TOOL_ROUNDS-1), until the LLM answers:
+ │   [core rebuilds ctx.messages from ctx.system_prompt + history;
+ │    rebuilds ctx.tools from the registry ∩ ctx.allowed_tools (strict whitelist);
+ │    sets ctx.tool_loop_round]
+ │   ├─ before_llm(ctx)               # may rewrite ctx.messages / ctx.tools / ctx.system_prompt / ctx.allowed_tools
+ │   [core applies ctx.system_prompt to messages[0]; sends the LLM request]
+ │   │   if the LLM returns tool_calls:
+ │   │     └─ per tool call:
+ │   │         ├─ [core gate: is ctx.allowed_tools set AND does it contain
+ │   │         │   this tool's name?]
+ │   │         │    ├── NO → veto with "error: tool '<name>' not available
+ │   │         │    │         to this agent"; no hook fires for this branch
+ │   │         │    └── YES → continue:
+ │   │         ├─ before_tool_call(ctx)     # rewrite ctx.tool_call or veto with None
+ │   │         ├─ [core executes the tool]
+ │   │         └─ after_tool_call(ctx)      # rewrite ctx.tool_result
+ │   │   [core appends history entries]
 │   └─ on_round(ctx)                   # fire-only observability
 ├─ prepare(ctx)              # ctx.final_answer is set; validate / normalize
 └─ finish(ctx)               # LAST word; may rewrite ctx.final_answer
@@ -358,6 +372,7 @@ class RunContext:
     agent_name: str | None      # which hooks subdir is active; None = default
     base_prompt: str | None     # immutable for the run — the original system prompt
     system_prompt: str | None   # CURRENT prompt; sticky; hook-editable (see below)
+    allowed_tools: list | None  # strict tool whitelist; sticky; hook-set (see below)
     turn: int                   # core-managed, 1-based, reset by Agent.reset()
     usage: dict                 # cumulative from the LLM client across the run
     extras: dict                # HOOKS ONLY — flat keys, run-scoped
@@ -599,6 +614,92 @@ in for the root's and its establishment hooks re-fire on the next `chat()`
 (further below). To remove the agent, delete `hook_modules/alpha/`. No
 registration anywhere.
 
+#### Per-agent tool access (strict whitelist)
+
+Tooling is **opt-in per agent**. The default `ctx.allowed_tools` is `None`,
+which means **no tools** — the core offers no tool schemas to the LLM and
+rejects every tool call with a well-formed `role: tool` error message so the
+LLM can adapt. An agent that *wants* tools must declare them.
+
+**The channel is `ctx.allowed_tools`.** A run-scoped, sticky list of tool
+names the agent's hooks set (usually in `enter_agent`). The core reads it at
+two points:
+
+1. **Offer** — before each LLM call, `ctx.tools` is rebuilt as the intersection
+   of the registry and `allowed_tools` (via `ToolRegistry.schemas_for`). An
+   empty/None set means the LLM is offered *zero* tools.
+2. **Execute** — if the LLM returns a `tool_calls` entry whose name is
+   *outside* the whitelist, the core records a `role: tool` message
+   `"error: tool '<name>' not available to this agent"` instead of executing.
+   The hook-level `before_tool_call` veto gate does **not** fire in that
+   branch — the core settles tool availability first, before any hook gets a
+   chance to (wrongly) allow a disallowed name.
+
+**Sticky semantics.** Like `system_prompt`, a change to `ctx.allowed_tools`
+persists until overwritten. `enter_agent` is the canonical place to set it
+(the right hook: it fires on first activation and on every switch *into* that
+agent, and the core resets it to `None` on each switch *before* the incoming
+agent's hooks fire — so a switched-to agent that declares nothing genuinely
+sees no tools, and a switched-from agent's whitelisted set does not leak
+across the shared `RunContext`). A hook that sets it in `before_llm` also
+sticks from that round on (it governs the execute-path veto for the current
+round). To narrow *this round only*, edit `ctx.tools` directly in
+`before_llm` (the documented escape hatch, e.g. the existing
+`ctx.tools.clear()` pattern) — that edit applies to the current offer but
+does not carry to the next round.
+
+**Declarative example** (`hook_modules/<agent>/tools.py`):
+
+```python
+from agent_seed.hooks import Hooks, RunContext
+
+ALLOWED_TOOLS: list[str] = ["calculator", "weather"]
+
+
+def enter_agent(ctx: RunContext) -> None:
+    """Declare this agent's tools when it takes over."""
+    ctx.allowed_tools = list(ALLOWED_TOOLS)
+
+
+def make() -> Hooks:
+    return Hooks(enter_agent=enter_agent)
+```
+
+- **Main agent, strict policy.** The nameless main agent (the `hook_modules/`
+  root, `agent_name=None`) also has to declare its tools — the repo ships
+  `hook_modules/00_tools.py` to allow `calculator` for it. Delete the file to
+  remove tool access from the main agent.
+- **A folder with no tool declaration = an agent with no tools.** There is no
+  implicit inheritance or default allow set; an agent that wants nothing
+  simply does not declare anything.
+- **Strict whitelist, no "base set".** There is no "always-on" tool that
+  bypasses the per-agent whitelist. If two agents both want `calculator`,
+  both declare it (or reuse a shared hook module).
+- **Slot-merge gotcha.** `enter_agent` is a hook slot; if two files in the
+  same folder both define it, the alphabetically-last wins. Compose your
+  tool declaration into the surviving hook.
+- **Inspect with `GET /tools?agent_name=<n>`.** The backend runs the agent's
+  `enter_agent` against a scratch `RunContext` and reports the resulting
+  `allowed_tools` (plus matching tool schemas). Strict policy: a folder with
+  no declaration returns `{"tools": [], "names": []}`.
+
+**Worked example — an agent with no tools.** A folder with a hook module that
+does not touch `allowed_tools`:
+
+```
+hook_modules/
+    00_tools.py             # main agent: calculator
+alpha/
+    sign.py                 # alpha declares no tools
+```
+
+`alpha`'s `sign.py` is a plain hook (say, a `finish`). On a switch into
+`alpha`, the core resets `allowed_tools` to `None` and `enter_agent` fires —
+the root's `enter_agent` does not (alpha replaces the root), so alpha's tools
+remain `None` and every tool call in the loop is rejected with
+`"error: tool ... not available to this agent"`. That is the strict-policy
+outcome for an undeclared agent.
+
 #### The agent-identity boundary (enter / exit)
 
 Because there is always an agent on the wheel, becoming active and leaving are
@@ -646,6 +747,7 @@ re-fires establishment on the next `chat()`, mirroring `set_session`.
 |-----------------------------------------------|---------------------|-----|
 | clean up / persist state when an agent is displaced | `exit_agent`    | runs as the outgoing agent; `ctx.agent_name` = old value (RAII pair with `enter_agent`) |
 | initialize state when an agent takes over     | `enter_agent`       | runs as the incoming agent; `ctx.agent_name` = new value; fires on construction too |
+| declare this agent's tools (strict whitelist) | `enter_agent`       | set `ctx.allowed_tools` (sticky; the core offers only these and vetoes the rest) |
 | override / extend / patch the system prompt   | `before_llm`        | read `ctx.base_prompt` + set `ctx.system_prompt` (sticky) |
 | inject RAG / context / date into the next LLM call only | `before_llm` | append to `ctx.messages` (per-request — history is not touched) |
 | disable tools for one call                      | `before_llm`        | `ctx.tools.clear()` |
@@ -783,11 +885,22 @@ Breaking any of these is a **major** change.
 10. **Establishment fires on need.** Run hooks strictly once; session hooks on
      each (re)establishment. Do not assume establishment fires every `chat()`.
 11. **The agent boundary is RAII and atomic.** There is always an agent in
-     place (the main one when `agent_name` is `None`). `enter_agent` fires on
-     first activation and on every incoming switch; `exit_agent` on every
-     outgoing switch, never at construction. A switch resolves the new hooks
-     first, so a broken target aborts cleanly — nothing is half-committed and
-     `exit_agent` is not fired for a switch that didn't happen.
+    place (the main one when `agent_name` is `None`). `enter_agent` fires on
+    first activation and on every incoming switch; `exit_agent` on every
+    outgoing switch, never at construction. A switch resolves the new hooks
+    first, so a broken target aborts cleanly — nothing is half-committed and
+    `exit_agent` is not fired for a switch that didn't happen.
+12. **Tool policy is opt-in per agent and strict.** The default
+    `ctx.allowed_tools` is `None`/`[]` (*no tools*): the core offers no tool
+    schemas and rejects every tool call with a well-formed `role: tool`
+    `"error: tool '<name>' not available to this agent"`. An agent declares
+    its tools by setting `ctx.allowed_tools` (canonically in `enter_agent`);
+    that set is sticky and governs both the **offer** (schemas) and the
+    **execute** (veto) paths. The core resets the field to `None` on each
+    agent switch, so a switched-to agent that declares nothing sees no tools
+    — there is no inheritance or "always-on" base set. A hook may *narrow* a
+    call (`before_tool_call`) or change this round's offer (`ctx.tools`), but
+    it can never *re-allow* a tool the whitelist already rejected.
 
 ### Extending the core with new slots
 
@@ -856,11 +969,53 @@ Avoid directly editing `ctx.messages[0]` for this: the core applies
 the direct edit.
 
 **Q: I added a new tool but the LLM never calls it.**
-A: First confirm it's registered in the registry the running process was created
-with — the default server uses the default registry, so a tool registered in
-`experiments/` is invisible to it. Next, check that the tool has a clear,
-first-line docstring; the LLM's tool-call decision is driven by that
-description.
+A: In this order:
+
+1. **Registered?** It must be in the `ToolRegistry` the `Agent` was created
+   with. A tool registered only in `experiments/` is invisible unless you pass
+   it into a `ToolRegistry` and give that registry to the `Agent` / `create_app`.
+2. **Whitelisted for the active agent?** Under the strict tool-whitelist
+   policy an agent must *declare* the tool by adding its name to
+   `ctx.allowed_tools` (in `enter_agent`). If the current agent's hook doesn't
+   list it, the core offers only the listed schemas (or none) — the LLM never
+   sees the new tool. Add it to that agent's whitelist: `ctx.allowed_tools =
+   ["calculator", "my_tool"]`.
+3. **Described?** A clear first-line docstring drives the LLM's call decision.
+
+**Q: My agent's tool call returns `"error: tool '<name>' not available to this
+agent"`. What is going on?**
+A: The active agent's `ctx.allowed_tools` does not include `<name>`. The core
+rejected the call at the execute-path veto gate before `before_tool_call`
+fired. Fix it by adding the name to the agent's whitelist in `enter_agent`
+(e.g. `ctx.allowed_tools = ["calculator", "<name>"]`). If the agent is a
+switched-in one and you expected it to inherit the previous agent's tools: it
+does not — tool policy is opt-in per agent. Declare what you want.
+
+**Q: How do I give agent X different tools than agent Y?**
+A: Put each in its own folder and set `ctx.allowed_tools` in each `enter_agent`:
+
+```python
+# hook_modules/x/tools.py
+from agent_seed.hooks import Hooks, RunContext
+
+def enter_agent(ctx: RunContext) -> None:
+    ctx.allowed_tools = ["calculator", "weather"]
+
+def make() -> Hooks:
+    return Hooks(enter_agent=enter_agent)
+
+# hook_modules/y/tools.py
+def enter_agent(ctx: RunContext) -> None:
+    ctx.allowed_tools = ["search"]
+
+def make() -> Hooks:
+    return Hooks(enter_agent=enter_agent)
+```
+
+The core filters both the offered schemas and the allowed executions to exactly
+the agent's set — no hook-level work needed. A switched-in agent that declares
+nothing sees *no* tools (strict default). See
+["Per-agent tool access (strict whitelist)"](#per-agent-tool-access-strict-whitelist).
 
 **Q: How do I get per-session state without a database?**
 A: Use `ctx.extras` in `ready_session`:
@@ -901,6 +1056,13 @@ the in-memory map.
 - **base prompt** — `ctx.base_prompt`: the immutable original system prompt for
   the run. Always available to hooks; use it as the source when computing a
   new `ctx.system_prompt`.
+- **allowed_tools** — `ctx.allowed_tools`: the sticky strict whitelist of tool
+  names the active agent may offer and call. Set by the agent's `enter_agent`
+  hook (or any other hook; sticky until overwritten). The core enforces it at
+  both the offer point (tool schemas) and the execute point (a non-allowed name
+  is rejected before `before_tool_call` runs). `None`/`[]` is *no tools* —
+  tooling is opt-in per agent. The core resets the field to `None` on each
+  agent switch, so a switched-to agent that declares nothing sees no tools.
 - **discovered hook** — a hook loaded automatically from `hook_modules/` via
   `make()` at first use.
 - **establishment** — the one-time (per run) or per-session (per session)
