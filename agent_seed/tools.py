@@ -57,7 +57,12 @@ _ARITH: dict[type, Callable[[Any, Any], Any]] = {
 
 
 def type_to_schema(tp: Any, name: str = "") -> dict[str, Any]:
-    """Convert a Python annotation to a JSON-schema fragment."""
+    """Convert a Python annotation to a JSON-schema fragment.
+
+    ``name`` is the parameter being mapped. It is accepted for future
+    name-aware extensions and a stable public signature; the mapping today is
+    purely type-driven and ignores it.
+    """
     import typing
 
     origin = typing.get_origin(tp)
@@ -134,6 +139,11 @@ class ToolRegistry:
         return self.register(fn)
 
     def get(self, name: str) -> ToolSpec | None:
+        """Public lookup: the :class:`ToolSpec` for ``name``, or ``None``.
+
+        Public API for external/programmatic use (dispatch, schema access). The
+        core's tool-policy path uses :meth:`schemas_for` / :meth:`call` instead.
+        """
         return self._tools.get(name)
 
     def names(self) -> list[str]:

@@ -136,6 +136,7 @@ def test_chat_streams_tool_then_token_then_done(tool_client):
     with test_client.stream("POST", "/chat", json={"message": "what is 6 * 7?"}) as response:
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/event-stream")
+        header_sid = response.headers["x-session-id"]
         body = "".join(response.iter_text())
 
     events = _events(body)
@@ -148,6 +149,8 @@ def test_chat_streams_tool_then_token_then_done(tool_client):
     assert tool_data["result"] == "42.0"
     assert token_data == {"text": "42.0"}
     assert done_data["session_id"]
+    # the X-Session-Id header must carry the same session id as the done event
+    assert header_sid == done_data["session_id"]
 
 
 def test_chat_missing_model_returns_500(monkeypatch, tmp_path):
@@ -250,3 +253,106 @@ def test_chat_agent_name_selects_subdir_hooks(monkeypatch, tmp_path):
         with test_client.stream("POST", "/chat", json={"message": "hi"}) as response:
             body = "".join(response.iter_text())
         assert "2000.0" in body and "200.0" not in body
+
+
+def test_chat_mid_stream_error_emits_error_event(monkeypatch):
+    # A mid-stream failure must surface as `event: error` and terminate the
+    # turn — no `done`. (Covers server.py's error branch + protocol.md's
+    # `error` event.)
+    def fake_client_factory(cfg):
+        class _Fake:
+            def chat(self, messages, tools=None, on_token=None):
+                raise RuntimeError("boom")
+
+        return _Fake()
+
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    monkeypatch.setattr(server, "OpenAICompatClient", fake_client_factory)
+
+    registry = ToolRegistry()
+    app = server.create_app(registry)
+    with TestClient(app) as test_client:
+        response = test_client.post("/chat", json={"message": "hi"})
+        assert response.status_code == 200
+        body = response.text
+
+    events = _events(body)
+    events_map = {k: d for k, d in events}
+    assert "error" in events_map
+    assert "done" not in events_map
+    assert "boom" in events_map["error"]["message"]
+
+
+def test_chat_agent_switch_mid_session_refires_establishment(tmp_path, monkeypatch):
+    # Posting the *same* session_id under two different agent_name values must
+    # re-resolve hooks on the live agent (server.py:72-75 branch) and apply the
+    # new agent's whitelist + hooks. Previously uncovered.
+    from agent_seed.discovery import reset_cache
+    from tests.conftest import text_completion, tool_completion
+
+    hooks_root = tmp_path / "hook_modules"
+    (hooks_root / "alpha").mkdir(parents=True)
+    (hooks_root / "alpha" / "a.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
+        "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 100\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent, after_tool_call=after_tool_call)\n"
+    )
+    (hooks_root / "beta").mkdir(parents=True)
+    (hooks_root / "beta" / "b.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
+        "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 1000\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent, after_tool_call=after_tool_call)\n"
+    )
+
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(hooks_root))
+    reset_cache()
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+
+    script = [
+        tool_completion("calculator", {"expression": "1 + 1"}),
+        text_completion("first"),
+        tool_completion("calculator", {"expression": "1 + 1"}),
+        text_completion("second"),
+    ]
+
+    def fake_client_factory(cfg):
+        class _Fake:
+            def chat(self, messages, tools=None, on_token=None):
+                completion = script.pop(0)
+                if on_token is not None and completion.content:
+                    on_token(completion.content)
+                return completion
+
+        return _Fake()
+
+    monkeypatch.setattr(server, "OpenAICompatClient", fake_client_factory)
+    app = server.create_app(registry)
+
+    with TestClient(app) as test_client:
+        # First turn: mint a session, use agent alpha (x100).
+        with test_client.stream(
+            "POST",
+            "/chat",
+            json={"message": "hi", "agent_name": "alpha"},
+        ) as response:
+            sid = response.headers["x-session-id"]
+            body1 = "".join(response.iter_text())
+        assert "200.0" in body1 and "2000.0" not in body1
+
+        # Second turn: SAME session_id, agent beta (x1000). The live agent
+        # must re-resolve to beta's hooks — the mid-session switch branch.
+        with test_client.stream(
+            "POST",
+            "/chat",
+            json={"message": "hi", "session_id": sid, "agent_name": "beta"},
+        ) as response:
+            assert response.headers["x-session-id"] == sid
+            body2 = "".join(response.iter_text())
+        assert "2000.0" in body2 and "200.0" not in body2

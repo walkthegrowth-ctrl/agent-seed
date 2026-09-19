@@ -522,7 +522,7 @@ Rules:
 #### Merge policies
 
 - Modules merge **alphabetically by filename**; on a slot conflict the file
-  that sorts **last** wins (`9_audit.py` overrides `a_audit.py`).
+  that sorts **last** wins (`b_audit.py` overrides `a_audit.py`).
 - A slot no module provides stays `None`.
 - `extras` is unaffected by merging (hooks coordinate through `ctx`, not
   through module state).

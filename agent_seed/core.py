@@ -25,6 +25,7 @@ from .discovery import get_hooks_for_agent
 from .hooks import Hooks, RunContext
 from .llm import LLMConfig, OpenAICompatClient
 from .tools import ToolError, ToolRegistry
+from .tools import registry as default_registry
 
 MAX_TOOL_ROUNDS = 8
 
@@ -90,8 +91,18 @@ class Agent:
             self.hooks.enter_agent(ctx)
 
     @classmethod
-    def from_env(cls, env: dict[str, str] | None = None) -> Agent:
-        return cls(OpenAICompatClient(LLMConfig.from_env(env)))
+    def from_env(
+        cls,
+        env: dict[str, str] | None = None,
+        registry: ToolRegistry | None = None,
+    ) -> Agent:
+        """Build an agent from environment variables (``LLM_*``).
+
+        Uses the shared default ``registry`` by default; pass a custom one to
+        change the available tools. Tools are still subject to the strict
+        per-agent whitelist (see ``docs/manual.md`` "Per-agent tool access").
+        """
+        return cls(OpenAICompatClient(LLMConfig.from_env(env)), registry or default_registry)
 
     # ------------------------------------------------------------------
     # public accessors

@@ -1,15 +1,17 @@
-"""Experiment: per-agent tool whitelisting (``ctx.allowed_tools``).
+"""Portable template: per-agent tool whitelisting (``ctx.allowed_tools``).
 
-The canonical pattern: ``enter_agent`` pins the run's tool whitelist the
-moment the agent takes over. The core enforces it at BOTH the offer point
-(schemas sent to the LLM) and the execute point (a call to a non-whitelisted
-name is rejected with a well-formed ``role: tool`` error), so tool access is
-opt-in per agent: a run with no ``allowed_tools`` set offers NO tools and
-refuses every tool call.
+A reusable PATTERN, never auto-loaded (it lives in ``experiments/``). Copy it
+into a named agent's folder — ``hook_modules/<agent_name>/tools.py`` — and
+only that agent gets the whitelisted tools. (Contrast
+``hook_modules/00_tools.py``: the same pattern, but auto-loaded and live for
+the main agent. The two are siblings, not interchangeable.)
 
-Promotion model: put a file like this inside ``hook_modules/<agent_name>/``
-and only that agent gets the whitelisted tools. The main agent can ship one
-at the root too — see ``hook_modules/00_tools.py`` in this repo.
+The pattern: ``enter_agent`` pins the run's tool whitelist the moment the
+agent takes over. The core enforces it at BOTH the offer point (schemas sent
+to the LLM) and the execute point (a call to a non-whitelisted name is
+rejected with a well-formed ``role: tool`` error), so tool access is opt-in
+per agent: a run with no ``allowed_tools`` set offers NO tools and refuses
+every tool call.
 
 Attach directly:
 
@@ -25,8 +27,9 @@ Notes:
   core resets ``allowed_tools`` to ``None`` on each switch BEFORE the
   incoming agent's hooks fire, so a switched-to agent that declares nothing
   genuinely sees no tools.
-* ``allow_all()`` is a convenience for an agent that should keep the whole
-  registered toolset — just don't restrict. See ``make_allow_all()``.
+* ``make_allow_all(names)`` builds a hooks whose ``enter_agent`` whitelists an
+  explicit set (e.g. the whole registered toolset). It is a convenience
+  factory, *not* a second discovery entrypoint — discovery only uses ``make()``.
 * Hook-level veto (``before_tool_call``) still works to *narrow* an allowed
   call further, but it never runs for a name the whitelist already rejected —
   the core settles that first.

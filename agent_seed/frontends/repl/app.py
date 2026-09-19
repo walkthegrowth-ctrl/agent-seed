@@ -23,7 +23,12 @@ class BackendError(RuntimeError):
 
 
 def sse_events(raw: str) -> Iterator[tuple[str, str]]:
-    """Yield (event, data_json_str) pairs from an SSE text body."""
+    """Yield (event, data_json_str) pairs from a fully-received SSE text body.
+
+    Buffered variant of :func:`sse_events_streaming` (which parses a live line
+    iterator). The REPL uses the streaming form; this is public/reference API
+    (e.g. tests, scripts over an HTTP response that is already in memory).
+    """
     event = "message"
     data_lines: list[str] = []
     for line in raw.splitlines():
@@ -81,6 +86,11 @@ class Session:
         self.session_id = uuid.uuid4().hex
 
     def tools(self) -> list[dict[str, Any]]:
+        """Public API: full OpenAI function schemas for the active agent.
+
+        The REPL's ``/tools`` only calls :meth:`tools_names` (the compact list);
+        this returns the full ``tools`` list for other clients / UIs.
+        """
         params = {"agent_name": self.agent_name} if self.agent_name is not None else None
         response = self.client.get(f"{self.url}/tools", params=params)
         response.raise_for_status()

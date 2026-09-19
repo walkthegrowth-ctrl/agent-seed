@@ -77,7 +77,8 @@ uv run agent-repl                 # defaults to http://127.0.0.1:8787
 
 REPL commands: `/help`, `/reset` (clear server-side session), `/tools`,
 `/agent [name]` / `/agents` (switch / list agents), `/model` (backend LLM config),
-`/quit`. Type `/quit` or press `Ctrl-D` to exit.
+`/quit` (or `/exit`). Type `/` alone to open a multi-line block (close with `/`
+and Enter). Type `/quit` or press `Ctrl-D` to exit.
 
 ### Example
 

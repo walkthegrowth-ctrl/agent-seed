@@ -390,3 +390,18 @@ def test_on_token_streams_only_final_content():
     tokens: list[str] = []
     agent.chat("q", on_token=tokens.append)
     assert tokens == ["4"]
+
+
+def test_from_env_builds_a_working_agent():
+    # Agent.from_env is a real factory: it must bind a registry (it used to
+    # omit one and raise TypeError) and resolve the config from the env dict.
+    agent = Agent.from_env(env={"LLM_MODEL": "env-model", "LLM_BASE_URL": "http://fake/v1"})
+    assert agent.client.config.model == "env-model"
+    assert agent.registry.names()  # default registry ships the calculator
+
+
+def test_from_env_missing_model_raises():
+    from agent_seed.llm import LLMConfigError
+
+    with pytest.raises(LLMConfigError, match="LLM_MODEL"):
+        Agent.from_env(env={"LLM_MODEL": ""})

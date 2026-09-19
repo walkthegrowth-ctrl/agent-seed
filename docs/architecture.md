@@ -51,7 +51,7 @@ request.
 | `agent_seed/discovery.py` | Auto-loads promoted hook modules from `hook_modules/` (once per process, cached; fail-fast). Resolves an `agent_name` to a subdirectory (`hook_modules/<name>/`) with the root as the default. |
 | `agent_seed/llm.py` | `OpenAICompatClient`: streaming `POST /chat/completions`, SSE line parsing, chunk folding. `LLMConfig.from_env`. |
 | `agent_seed/tools.py` | `ToolRegistry`, `@tool`, JSON-schema generation from annotations, and the starter `calculator`. |
-| `agent_seed/backends/http/server.py` | FastAPI app, session store, `POST /chat` SSE, `/tools`, `/config`, `/health`, `/reset`. |
+| `agent_seed/backends/http/server.py` | FastAPI app, session store, `POST /chat` SSE, `GET /tools`, `GET /agents`, `GET /config`, `GET /health`, `POST /reset`. |
 | `agent_seed/backends/http/cli.py` | `agent-seed` entry point (uvicorn). |
 | `agent_seed/frontends/repl/app.py` | `Session` (HTTP client), SSE parse + render, slash-commands. |
 | `agent_seed/frontends/repl/cli.py` | `agent-repl` entry point. |
@@ -80,20 +80,17 @@ no auth, single-user by design — see below.
 
 ## Extending
 
-- New tool → register it (see `manual.md`); the schema, dispatch, and
-  tests all fall out for free.
-- New frontend → implement the protocol (see `protocol.md`); reuse
-  `frontends/repl/app.py::Session` as a reference client or speak raw HTTP.
+Extension is a client-only or hook-only concern — the core is not modified.
+`docs/manual.md` is the source of truth for tools, hooks, and agents; the
+bullets below just point at the relevant section.
+
+- New tool → `manual.md` "Adding tools".
+- New agent behavior (context, policy, budget, ...) → a hook; `manual.md`
+  "Hooks — the extension surface".
+- A different *agent* (a distinct hook set) → `hook_modules/<agent_name>/`;
+  `manual.md` "Agents: hook subdirectories".
+- New frontend → `protocol.md`; `frontends/repl/app.py::Session` is the
+  reference client.
 - New backend transport (e.g. WebSocket, gRPC) → expose `core.Agent` the same
   way `backends/http/server.py` does; `Agent.chat(message, on_token, on_event)`
   is the stable interface.
-- New agent behavior (context, policy, budget, ...) → write a hook and attach
-  it via `Hooks(...)` (see `manual.md`); promote a hook module (a
-  `def make() -> Hooks` file) into `hook_modules/` to auto-load it in every
-  `Agent`. Prototype in `experiments/` first — never auto-loaded. No core
-  changes needed.
-- A different *agent* (a distinct hook set) → put its modules in
-  `hook_modules/<agent_name>/` and select it with `Agent(agent_name=...)`,
-  `Agent.set_agent_name(...)`, or the `agent_name` field on `POST /chat`
-  (see `protocol.md`, `manual.md`). The root `hook_modules/` is the default
-  agent; a subdirectory replaces the root's hooks for that agent.
