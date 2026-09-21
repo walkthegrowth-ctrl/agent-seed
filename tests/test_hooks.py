@@ -443,8 +443,10 @@ def test_extras_allows_inter_hook_coordination():
 
 def test_usage_is_accumulated_from_client():
     class UsageClient(FakeLLMClient):
-        def chat(self, messages, tools=None, on_token=None):  # type: ignore[override]
-            completion = super().chat(messages, tools=tools, on_token=on_token)
+        def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+            completion = super().chat(
+                messages, tools=tools, on_token=on_token, config=config, max_tokens=max_tokens
+            )
             completion.usage = {"prompt_tokens": 10, "completion_tokens": 5}
             return completion
 

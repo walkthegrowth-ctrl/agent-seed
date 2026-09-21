@@ -22,6 +22,23 @@ class BackendError(RuntimeError):
         super().__init__(f"cannot reach backend at {url}: {detail}")
 
 
+def unquote(value: str | None) -> str | None:
+    """Strip one layer of matching surrounding quotes the user typed.
+
+    The REPL tokenizes on whitespace itself, so a user who writes
+    ``/model "qwen3.8:27b"`` produces the literal token ``"qwen3.8:27b"``
+    (quotes included). Sent verbatim, that becomes an invalid model name on
+    the backend (400). A single layer of matching quotes is therefore peeled
+    off; anything else — including internal or unbalanced quotes — is kept
+    exactly as typed.
+    """
+    if value is None or len(value) < 2:
+        return value
+    if value[0] == value[-1] and value[0] in ('"', "'"):
+        return value[1:-1]
+    return value
+
+
 def sse_events(raw: str) -> Iterator[tuple[str, str]]:
     """Yield (event, data_json_str) pairs from a fully-received SSE text body.
 
@@ -111,9 +128,23 @@ class Session:
         self.agent_name = name
 
     def model(self) -> dict[str, Any] | None:
-        # /config is part of the documented protocol, but the REPL treats it
-        # as optional: it shows the config only when the backend answers 200
-        # (older backends without the endpoint simply render nothing).
+        """This session's LLM config, falling back to the server default.
+
+        /config is part of the documented protocol; the REPL treats it as
+        optional: it shows the config only when the backend answers 200
+        (older backends without the endpoint simply render nothing).
+        """
+        try:
+            response = self.client.get(
+                f"{self.url}/config", params={"session_id": self.session_id}
+            )
+            if response.status_code == 200:
+                return response.json()
+        except httpx.HTTPError:
+            pass
+        return self._server_config()
+
+    def _server_config(self) -> dict[str, Any] | None:
         try:
             response = self.client.get(f"{self.url}/config")
             if response.status_code == 200:
@@ -121,6 +152,22 @@ class Session:
         except httpx.HTTPError:
             pass
         return None
+
+    def set_model(self, model: str, base_url: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"session_id": self.session_id, "model": model}
+        if base_url is not None:
+            payload["base_url"] = base_url
+        response = self.client.post(f"{self.url}/config", json=payload)
+        response.raise_for_status()
+        return response.json()
+
+    def test_model(self, model: str, base_url: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {"session_id": self.session_id, "model": model}
+        if base_url is not None:
+            payload["base_url"] = base_url
+        response = self.client.post(f"{self.url}/config/test", json=payload)
+        response.raise_for_status()
+        return response.json()
 
     def chat_stream(self, message: str) -> Iterator[tuple[str, dict[str, Any]]]:
         payload: dict[str, Any] = {"session_id": self.session_id, "message": message}
@@ -161,7 +208,10 @@ HELP = """[bold]commands[/]
   /agent [n]   set the agent (a hooks subdirectory); no arg shows current
   /agents      list discoverable agent names from the backend
   /tools       list tools registered on the backend
-  /model       show backend LLM config (if the backend exposes /config)
+  /model       show the session's LLM config
+  /model <n>   switch the model (probe first; abort if the model is not reachable)
+  /model force <n>  switch without a probe (use when probe can't reach it)
+  /model test <n>  ping-test a model without switching
   /quit        exit
   /            (alone) open a multi-line block — see below
 
@@ -327,11 +377,76 @@ class Repl:
             CONSOLE.print("[bold]tools:[/] " + ", ".join(names))
             return True
         if cmd == "/model":
-            config = session.model()
-            if config is None:
-                CONSOLE.print("[dim]backend does not expose /config[/]")
+            parts = text.split()
+            if len(parts) == 1:
+                config = session.model()
+                if config is None:
+                    CONSOLE.print("[dim]backend does not expose /config[/]")
+                else:
+                    CONSOLE.print(json.dumps({"llm": config.get("llm")}, indent=2, default=str))
+            elif parts[1] == "test":
+                if len(parts) < 3:
+                    CONSOLE.print("[red]usage:[/] /model test <name> [base_url]")
+                    return True
+                self._model_probe(session, parts[2], parts[3] if len(parts) > 3 else None)
+            elif parts[1] == "force":
+                if len(parts) < 3:
+                    CONSOLE.print("[red]usage:[/] /model force <name> [base_url]")
+                    return True
+                self._model_set(
+                    session, parts[2], parts[3] if len(parts) > 3 else None, probe=False
+                )
             else:
-                CONSOLE.print(config)
+                if len(parts) < 2:
+                    CONSOLE.print(
+                        "[red]usage:[/] /model <name> [base_url]  "
+                        "(or /model test <name>, /model force <name>)"
+                    )
+                    return True
+                self._model_set(
+                    session, parts[1], parts[2] if len(parts) > 2 else None, probe=True
+                )
             return True
         CONSOLE.print(f"[red]unknown command:[/] {cmd} (try /help)")
         return True
+
+    def _model_probe(self, session: Session, model: str, base_url: str | None) -> None:
+        """Run a pure probe (``/model test``) and report the outcome."""
+        try:
+            result = session.test_model(unquote(model), unquote(base_url) if base_url else None)
+        except httpx.HTTPError as exc:
+            CONSOLE.print(f"[bold red]error:[/] {exc}")
+            return
+        if result.get("ok"):
+            CONSOLE.print(f"[green]ok:[/] {result.get('model')} ({result.get('latency_ms')} ms)")
+        else:
+            CONSOLE.print(f"[red]failed:[/] {result.get('error')}")
+
+    def _model_set(self, session: Session, model: str, base_url: str | None, probe: bool) -> None:
+        """Commit a model switch. If ``probe`` is set, ping the model first and
+        abort (keeping the current model) when it cannot be reached — so a
+        typo'd name never becomes the live model."""
+        model = unquote(model)
+        base_url = unquote(base_url) if base_url else None
+        if probe:
+            try:
+                result = session.test_model(model, base_url)
+            except httpx.HTTPError as exc:
+                CONSOLE.print(f"[bold red]error:[/] {exc}")
+                return
+            if not result.get("ok"):
+                CONSOLE.print(
+                    f"[red]not set:[/] probe failed for {model!r} ({result.get('error')})"
+                )
+                CONSOLE.print(
+                    "[dim]current model unchanged — retry with /model force "
+                    f"{model} to set it anyway[/]"
+                )
+                return
+        try:
+            outcome = session.set_model(model, base_url)
+        except httpx.HTTPError as exc:
+            CONSOLE.print(f"[bold red]error:[/] {exc}")
+            return
+        effective = (outcome.get("llm") or {}).get("model", "?")
+        CONSOLE.print(f"[green]model:[/] {effective}")

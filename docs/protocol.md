@@ -19,19 +19,97 @@ backend. If you build a new frontend, this is the only spec you need.
 
 ## `GET /config`
 
-`200` — LLM configuration as understood by the server.
+`200` — LLM configuration. Two forms:
+
+Without `session_id` — the server's default LLM.
 
 ```json
 {
   "llm": {
     "base_url": "http://localhost:11434/v1",
     "model": "qwen3:8b",
-    "api_key_set": true
+    "api_key_set": true,
+    "timeout": 120.0
   }
 }
 ```
 
 `llm` may be `null` if `LLM_MODEL` is unset.
+
+With `session_id` — that session's effective LLM (what the core calls) and its
+immutable reference (what the session started from):
+
+```json
+{
+  "llm": { "base_url": "http://localhost:11434/v1", "model": "chosen-model", "api_key_set": true, "timeout": 120.0 },
+  "base": { "base_url": "http://localhost:11434/v1", "model": "env-model", "api_key_set": true, "timeout": 120.0 }
+}
+```
+
+A `session_id` is valid as soon as the **client** names it — frontends mint
+their own id at startup. So this works even before the first `POST /chat`:
+
+- If a config was already `POST /config`-ed for that id, the response echoes it
+  (`llm` = the pending config, `base` = the app default).
+- `404` only if the id was never touched (no live session and no pending config).
+
+## `POST /config`
+
+Set the LLM at runtime. Body (all fields optional; at least one required):
+
+```json
+{
+  "session_id": "<optional>",
+  "model": "new-model",
+  "base_url": "http://...",
+  "api_key": "...",
+  "timeout": 60.0
+}
+```
+
+- Without `session_id`, the change becomes the **app default** (used by all
+  new sessions) and is applied to every live session.
+- With `session_id`, only that session's LLM is changed.
+
+A `session_id` is valid even before the first `POST /chat` (the client mints
+its own id up front). For a not-yet-created session the config is stored as
+**pending** and the session adopts it as its base at creation; the active
+agent's `enter_agent`/`before_llm` may still override or restore.
+
+The supplied fields are merged over the current config. `on_model_change` (a
+hook veto) applies to *live* sessions only — a pending config records the
+request verbatim, since no agent has taken over yet.
+
+Status codes:
+
+- `200` — applied or recorded. Body: `{ "ok": true, "session_id": "<id>", "llm": {...} }`
+  (omit `session_id` when applied globally).
+- `400` — no fields supplied / empty `model`.
+- `409` — vetoed by `on_model_change`. Body: `{ "error": "<reason>" }`.
+
+`api_key` is never returned (only `api_key_set`).
+
+## `POST /config/test`
+
+Probe a candidate LLM config (one minimal ping completion) without persisting
+it. Body is the same partial shape as `POST /config` minus `session_id`:
+
+```json
+{ "model": "candidate-model", "base_url": "http://..." }
+```
+
+Fields are merged over the app default. This is a diagnostic: it does **not**
+go through `on_model_change` (a probe failing is a finding, not a change — use
+`POST /config` for a gated change).
+
+`200` — the probe ran to completion. Body carries `ok` (the finding):
+
+```json
+{ "ok": true, "error": null, "latency_ms": 42.1, "usage": {...}, "model": "candidate-model" }
+```
+```json
+{ "ok": false, "error": "connection refused", "latency_ms": 12.0, "usage": null, "model": "candidate-model" }
+```
 
 ## `GET /tools`
 

@@ -5,9 +5,9 @@ Wire format (see docs/protocol.md):
     GET  /agents  -> discoverable agent names (subdirectories of the hooks root)
     GET  /config  -> server-side LLM config (llm | null)
     GET  /health  -> {"status": "ok", "version": ...}
-    GET  /tools   -> tool schemas (OpenAI function form) + names
-                       (with ?agent_name=<n>: only the tools that agent's
-                       whitelist allows; without: the whole catalog)
+    GET  /tools   -> this app's tool schemas (OpenAI function form) + names
+                        (with ?agent_name=<n>: only the tools that agent's
+                        whitelist allows; without: the app's whole catalog)
     POST /reset   body {"session_id"} -> clears that session's history
 """
 
@@ -37,6 +37,33 @@ class ChatRequest(BaseModel):
     agent_name: str | None = None
 
 
+class LLMUpdate(BaseModel):
+    """Partial LLM config; at least one field must be supplied.
+
+    The missing fields are merged over the current config (the session's
+    ``current_model`` when a ``session_id`` is given, else the app default).
+    """
+
+    model: str | None = None
+    base_url: str | None = None
+    api_key: str | None = None
+    timeout: float | None = None
+
+
+class ConfigUpdate(LLMUpdate):
+    session_id: str | None = None
+
+
+def llm_public(cfg: LLMConfig) -> dict[str, Any]:
+    """A serializable view of an LLMConfig; the api key is never returned."""
+    return {
+        "base_url": cfg.base_url,
+        "model": cfg.model,
+        "api_key_set": bool(cfg.api_key),
+        "timeout": cfg.timeout,
+    }
+
+
 class SessionRequest(BaseModel):
     session_id: str
 
@@ -52,6 +79,38 @@ class SessionStore:
         self._agents: dict[str, Agent] = {}
         self._registry = registry
         self._hooks = hooks
+        # App-default LLM for NEW sessions (None -> env at session creation).
+        # A POST /config without session_id updates this AND all live sessions.
+        self._default_llm: LLMConfig | None = None
+        # Configs set for a session_id that has not been created yet (no live
+        # Agent). The frontends mint a session_id up front, so "/model <name>"
+        # can legitimately arrive before the first /chat; the session adopts
+        # this config as its base when it is created (see get()).
+        self._pending: dict[str, LLMConfig] = {}
+
+    def default_llm(self) -> LLMConfig:
+        """The app-default LLM (the app-level setting if set, else env)."""
+        if self._default_llm is not None:
+            return self._default_llm
+        return LLMConfig.from_env()
+
+    def set_default_llm(self, cfg: LLMConfig) -> None:
+        self._default_llm = cfg
+
+    def pending(self, session_id: str) -> LLMConfig | None:
+        """A config set for session_id before the session was created, or None."""
+        return self._pending.get(session_id)
+
+    def set_pending(self, session_id: str, cfg: LLMConfig) -> None:
+        self._pending[session_id] = cfg
+
+    def agent(self, session_id: str) -> Agent | None:
+        return self._agents.get(session_id)
+
+    @property
+    def registry(self) -> ToolRegistry:
+        """The tool registry this app serves (what `GET /tools` reports)."""
+        return self._registry
 
     def get(self, session_id: str | None, agent_name: str | None = None) -> tuple[str, Agent]:
         session_id = session_id or uuid.uuid4().hex
@@ -60,8 +119,12 @@ class SessionStore:
             # One run per Agent. The run id is per-Agent (for debugging,
             # logging, and future parallel runs); the session id is the
             # conversation id and can later be switched via Agent.set_session.
+            # A config pre-set for this session_id wins over the app default.
+            cfg = self._pending.pop(session_id, None) or self.default_llm()
+            # An app-default (not env-derived) LLM is passed explicitly so
+            # Agent.base_model is whatever the app has been told to use.
             agent = Agent(
-                OpenAICompatClient(LLMConfig.from_env()),
+                OpenAICompatClient(cfg),
                 self._registry,
                 hooks=self._hooks,
                 run_id=uuid.uuid4().hex,
@@ -103,18 +166,121 @@ def create_app(
         return {"status": "ok", "version": __version__}
 
     @app.get("/config")
-    def config() -> dict[str, Any]:
-        try:
-            llm = LLMConfig.from_env()
-        except LLMConfigError:
-            return {"llm": None}
-        return {
-            "llm": {
-                "base_url": llm.base_url,
-                "model": llm.model,
-                "api_key_set": bool(llm.api_key and llm.api_key != "unset"),
+    def config(session_id: str | None = None) -> JSONResponse:
+        if session_id is None:
+            try:
+                llm = sessions.default_llm()
+            except LLMConfigError:
+                return JSONResponse({"llm": None})
+            return JSONResponse({"llm": llm_public(llm)})
+        agent = sessions.agent(session_id)
+        if agent is None:
+            pending = sessions.pending(session_id)
+            if pending is None:
+                return JSONResponse({"error": f"no such session: {session_id}"}, status_code=404)
+            # Session not created yet, but a config was set for it: report it.
+            return JSONResponse(
+                {
+                    "llm": llm_public(pending),
+                    "base": llm_public(sessions.default_llm()),
+                }
+            )
+        return JSONResponse(
+            {
+                "llm": llm_public(agent.context.current_model),
+                "base": llm_public(agent.context.base_model),
             }
-        }
+        )
+
+    @app.post("/config")
+    def set_config(body: ConfigUpdate) -> JSONResponse:
+        if (
+            body.model is None
+            and body.base_url is None
+            and body.api_key is None
+            and body.timeout is None
+        ):
+            return JSONResponse(
+                {"error": "at least one of model, base_url, api_key, timeout is required"},
+                status_code=400,
+            )
+
+        def merge(base: LLMConfig) -> LLMConfig:
+            return base.with_updates(
+                base_url=body.base_url,
+                api_key=body.api_key,
+                model=body.model,
+                timeout=body.timeout,
+            )
+
+        try:
+            if body.session_id is not None:
+                agent = sessions.agent(body.session_id)
+                if agent is None:
+                    # The session id is known to the caller but not yet created
+                    # (frontends mint a session_id up front, so "/model <name>"
+                    # can arrive before the first /chat). Record it as pending;
+                    # SessionStore.get() adopts it when the session starts. The
+                    # active agent's enter_agent still runs at creation and can
+                    # override (sub-agent specialization) or restore base.
+                    base = sessions.pending(body.session_id) or sessions.default_llm()
+                    effective = merge(base)
+                    sessions.set_pending(body.session_id, effective)
+                    return JSONResponse(
+                        {"ok": True, "session_id": body.session_id, "llm": llm_public(effective)}
+                    )
+                target = agent.context.current_model or sessions.default_llm()
+                effective = merge(target)
+                effective = agent.set_model(effective)  # on_model_change may veto (raise)
+                return JSONResponse(
+                    {"ok": True, "session_id": body.session_id, "llm": llm_public(effective)}
+                )
+            # No session: become the app default and apply to every live session.
+            target = sessions.default_llm()
+            effective = merge(target)
+            sessions.set_default_llm(effective)
+            for agent in sessions._agents.values():
+                agent.set_model(effective)  # on_model_change may veto (raise)
+            return JSONResponse({"ok": True, "llm": llm_public(effective)})
+        except LLMConfigError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+        except Exception as exc:  # noqa: BLE001 - hook veto or client failure
+            return JSONResponse({"error": str(exc)}, status_code=409)
+
+    @app.post("/config/test")
+    def test_config(body: ConfigUpdate) -> JSONResponse:
+        # Merge over the most specific base available: the (pending or live)
+        # session if given, else the app default.
+        try:
+            if body.session_id is not None:
+                agent = sessions.agent(body.session_id)
+                if agent is not None:
+                    base = agent.context.current_model or sessions.default_llm()
+                else:
+                    base = sessions.pending(body.session_id) or sessions.default_llm()
+            else:
+                base = sessions.default_llm()
+        except LLMConfigError:
+            base = LLMConfig(base_url="http://localhost:11434/v1", api_key="unused", model="probe")
+        try:
+            candidate = base.with_updates(
+                base_url=body.base_url,
+                api_key=body.api_key,
+                model=body.model,
+                timeout=body.timeout,
+            )
+        except LLMConfigError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)})
+        probe = Agent.test_model(candidate)
+        return JSONResponse(
+            {
+                "ok": probe.ok,
+                "error": probe.error,
+                "latency_ms": probe.latency_ms,
+                "usage": probe.usage,
+                "model": candidate.model,
+            }
+        )
 
     @app.get("/tools")
     def tools(agent_name: str | None = None) -> dict[str, Any]:
@@ -124,19 +290,21 @@ def create_app(
         # We learn the declared set by running the agent's enter_agent hook
         # against a scratch RunContext (strict policy: None -> no tools).
         if agent_name is None:
-            return {"tools": registry.schemas(), "names": registry.names()}
-        hooks = get_hooks_for_agent(agent_name)
-        allowed: list[str] | None = None
-        if hooks is not None and hooks.enter_agent is not None:
-            ctx = RunContext(agent_name=agent_name)
-            hooks.enter_agent(ctx)
-            allowed = ctx.allowed_tools
-        if not allowed:  # None or [] -> this agent offers NO tools
-            return {"tools": [], "names": []}
-        return {
-            "tools": registry.schemas_for(allowed),
-            "names": allowed,
-        }
+            tools = registry.schemas()
+        else:
+            # Only the tools that agent's whitelist allows. We learn the
+            # declared set by running the agent's enter_agent hook against a
+            # scratch RunContext (strict policy: None -> no tools).
+            hooks = get_hooks_for_agent(agent_name)
+            allowed: list[str] | None = None
+            if hooks is not None and hooks.enter_agent is not None:
+                ctx = RunContext(agent_name=agent_name)
+                hooks.enter_agent(ctx)
+                allowed = ctx.allowed_tools
+            tools = registry.schemas_for(allowed) if allowed else []
+        # names always reflects the tools actually returned (never a whitelist
+        # name that is not in the app's registry).
+        return {"tools": tools, "names": [t["function"]["name"] for t in tools]}
 
     @app.get("/agents")
     def agents() -> dict[str, Any]:

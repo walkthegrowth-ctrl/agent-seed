@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from agent_seed.discovery import reset_cache
-from agent_seed.llm import Completion, ToolCall
+from agent_seed.llm import Completion, LLMConfig, ToolCall
 
 
 @pytest.fixture(autouse=True)
@@ -31,17 +31,26 @@ def _hermetic_hook_discovery(tmp_path, monkeypatch):
 class FakeLLMClient:
     """Yields scripted completions; records every request it receives."""
 
-    def __init__(self, script: list[Completion]) -> None:
+    def __init__(
+        self,
+        script: list[Completion],
+        config: LLMConfig | None = None,
+    ) -> None:
         self.script = list(script)
         self.requests: list[dict[str, Any]] = []
+        self.config = config or LLMConfig(
+            base_url="http://fake.local/v1", api_key="unused", model="fake-model"
+        )
 
     def chat(
         self,
         messages,
         tools=None,
         on_token=None,
+        config=None,
+        max_tokens=None,
     ) -> Completion:
-        self.requests.append({"messages": messages, "tools": tools})
+        self.requests.append({"messages": messages, "tools": tools, "config": config})
         if not self.script:
             raise AssertionError("FakeLLMClient: no scripted completion left")
         completion = self.script.pop(0)

@@ -59,6 +59,10 @@ All config is via environment variables (see `.env.example`):
 | `AGENT_SERVER_PORT` | `8787` | bind port for the backend |
 | `HOOKS_ROOT` | `hook_modules` | hooks folder (root agent); agent subdirs live under it |
 
+Note: there is no `LLM_TIMEOUT` env var; the client uses a 120 s default.
+Change it at runtime with `POST /config` (the body accepts a `timeout`
+field) — see `docs/protocol.md` — rather than a `.env` entry.
+
 ## Run
 
 Terminal 1 — backend:
@@ -136,7 +140,8 @@ tests/
   test_discovery.py       hook_modules scan, agent selection, enter/exit boundary
   test_llm.py             SSE parsing + chunk folding
   test_backend.py         real FastAPI app end-to-end (mocked LLM)
-  test_repl.py            REPL: SSE parse + Session client
+  test_model_selection.py runtime model selection (set_model / on_model_change / test_model)
+  test_repl.py            REPL: SSE parse, Session client, /model & /model force & /model test
   test_repl_loop.py       REPL: command loop + slash commands
 ```
 

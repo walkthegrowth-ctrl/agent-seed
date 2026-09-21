@@ -8,16 +8,40 @@ from agent_seed.frontends.repl import app as app_module
 
 
 class _FakeSession:
-    """Records the message strings Repl._turn would POST to the backend."""
+    """Records the message strings Repl._turn would POST to the backend.
+
+    Also implements the model-related surface used by ``/model`` commands:
+    ``model`` (returns the current config), ``test_model`` (probe), and
+    ``set_model`` (commit). ``_model_probe`` / ``_model_set`` call these.
+    """
 
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.model_calls: list[str] = []
+        self.test_model_calls: list[tuple[str, str | None]] = []
+        self.set_model_calls: list[tuple[str, str | None]] = []
+        # configurable probe outcome
+        self.probe_ok: bool = True
+        self.probe_error: str | None = None
 
     def chat_stream(self, message: str) -> Iterator[tuple[str, dict[str, Any]]]:
         self.sent.append(message)
-        # One token event so Repl._turn's "agent> " branch runs harmlessly.
         yield "token", {"text": "[response]"}
         yield "done", {}
+
+    def model(self) -> dict[str, Any] | None:
+        self.model_calls.append("current")
+        return {"llm": {"model": "initial-model"}}
+
+    def test_model(self, model: str, base_url: str | None = None) -> dict[str, Any]:
+        self.test_model_calls.append((model, base_url))
+        if self.probe_ok:
+            return {"ok": True, "model": model, "latency_ms": 1.0, "error": None}
+        return {"ok": False, "model": model, "error": self.probe_error or "boom"}
+
+    def set_model(self, model: str, base_url: str | None = None) -> dict[str, Any]:
+        self.set_model_calls.append((model, base_url))
+        return {"ok": True, "llm": {"model": model}}
 
     def close(self) -> None:
         pass
@@ -26,14 +50,16 @@ class _FakeSession:
 def _run_with_inputs(
     inputs: Sequence[Any],
     history: Any = None,
+    session: _FakeSession | None = None,
 ) -> tuple[_FakeSession, list[str]]:
     """Drive Repl._loop with a scripted sequence of prompt() results.
 
     ``inputs`` items are either strings (a user line) or an Exception class
-    (prompt raises an instance of it). The loop must always exit, so the
+    (prompt raises an instance). The loop must always exit, so the
     harness guarantees an EOFError once the script is exhausted.
     """
-    session = _FakeSession()
+    if session is None:
+        session = _FakeSession()
     it = iter(list(inputs))
     prints: list[str] = []
 
@@ -137,3 +163,61 @@ def test_joined_block_is_written_to_file_history_once() -> None:
     finally:
         if os.path.exists(tmp):
             os.remove(tmp)
+
+
+# -- /model command routes ----------------------------------------------------
+
+
+def _mk_session(**kw: Any) -> _FakeSession:
+    session = _FakeSession()
+    for key, value in kw.items():
+        setattr(session, key, value)
+    session.agent_name = None
+    return session
+
+
+def test_model_no_arg_shows_current_config() -> None:
+    session = _mk_session()
+    _, _ = _run_with_inputs(["/model", "/quit"], session=session)
+    assert session.model_calls == ["current"]
+    assert session.set_model_calls == []
+
+
+def test_model_test_only_probes_no_set() -> None:
+    session = _mk_session()
+    _run_with_inputs(["/model test qwen3.8:27b", "/quit"], session=session)
+    assert session.test_model_calls == [("qwen3.8:27b", None)]
+    assert session.set_model_calls == []
+
+
+def test_model_plain_probes_then_sets_when_probe_ok() -> None:
+    session = _mk_session()
+    _run_with_inputs(["/model qwen3.8:27b", "/quit"], session=session)
+    assert session.test_model_calls == [("qwen3.8:27b", None)]
+    assert session.set_model_calls == [("qwen3.8:27b", None)]
+
+
+def test_model_plain_aborts_when_probe_fails_keeps_model() -> None:
+    session = _mk_session(probe_ok=False, probe_error="connection refused")
+    _, prints = _run_with_inputs(["/model qwen3.8:27b", "/quit"], session=session)
+    assert session.test_model_calls == [("qwen3.8:27b", None)]
+    assert session.set_model_calls == []
+    assert any("not set" in t for t in prints)
+    assert any("qwen3.8:27b" in t for t in prints)  # the abort message mentions it
+
+
+def test_model_force_sets_without_probe() -> None:
+    session = _mk_session()
+    _run_with_inputs(["/model force qwen3.8:27b http://x/v1", "/quit"], session=session)
+    # force must NOT probe at all
+    assert session.test_model_calls == []
+    assert session.set_model_calls == [("qwen3.8:27b", "http://x/v1")]
+
+
+def test_model_usage_errors_remain_in_normal_mode() -> None:
+    # /model test with no name -> prints usage, stays alive
+    session = _mk_session()
+    session2, prints = _run_with_inputs(["/model test", "still-here", "/quit"], session=session)
+    assert session2.set_model_calls == []
+    assert session2.test_model_calls == []
+    assert any("usage" in t.lower() for t in prints)

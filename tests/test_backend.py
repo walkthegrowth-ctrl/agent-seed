@@ -34,27 +34,37 @@ def _make_app(script, hooks=None):
 
     Under strict tool-whitelist policy, ``hooks`` (if provided) must include an
     ``enter_agent`` that sets ``ctx.allowed_tools``; otherwise the agent offers
-    no tools.
+    no tools. ``app.state.fakes`` collects every created client (each carries
+    ``config`` and ``last_chat_config``) so tests can assert which model the
+    core actually called with.
     """
     from agent_seed.llm import Completion  # noqa: F401 - ensure import path works
 
-    def fake_client_factory(cfg):
-        class _Fake:
-            def chat(self, messages, tools=None, on_token=None):
-                completion = script.pop(0)
-                if on_token is not None and completion.content:
-                    on_token(completion.content)
-                return completion
+    class _Fake:
+        def __init__(self, config):
+            self.config = config
 
-        return _Fake()
-
-    monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setenv("LLM_MODEL", "test-model")
-    monkeypatch.setattr(server, "OpenAICompatClient", fake_client_factory)
+        def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+            self.last_chat_config = config
+            completion = script.pop(0)
+            if on_token is not None and completion.content:
+                on_token(completion.content)
+            return completion
 
     registry = ToolRegistry()
     registry.register(calculator)
     app = server.create_app(registry, hooks=hooks)
+    app.state.fakes = []
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    def fake_client_factory(cfg):
+        fake = _Fake(cfg)
+        app.state.fakes.append(fake)
+        return fake
+
+    monkeypatch.setattr(server, "OpenAICompatClient", fake_client_factory)
     return app, registry, monkeypatch
 
 
@@ -129,6 +139,33 @@ def test_tools_endpoint_agent_name_reflects_whitelist(monkeypatch, tmp_path):
         # unknown agent -> falls back to the root hooks (none) -> no tools
         unknown = test_client.get("/tools", params={"agent_name": "nope"}).json()
         assert unknown == {"tools": [], "names": []}
+
+
+def test_tools_endpoint_uses_apps_registry_not_global(monkeypatch):
+    # Regression (1.1): the /tools catalog must reflect the registry the app
+    # was built with, not agent_seed.tools.registry. We register a tool under a
+    # UNIQUE name that is absent from the global default registry, so the old
+    # bug (reporting the global catalog) would return ['calculator'] and fail.
+    from agent_seed.hooks import Hooks
+
+    reg = ToolRegistry()
+
+    @reg.register
+    def weather(city: str) -> str:
+        """Get current weather for a city."""
+        return "sunny"
+
+    hooks = Hooks(enter_agent=lambda ctx: setattr(ctx, "allowed_tools", ["weather"]))
+    app = server.create_app(reg, hooks=hooks)
+
+    with TestClient(app) as test_client:
+        full = test_client.get("/tools").json()
+        assert full["names"] == ["weather"]
+        assert full["tools"][0]["function"]["name"] == "weather"
+        # and an agent that whitelists the same name resolves against this app
+        per_agent = test_client.get("/tools", params={"agent_name": "nope"}).json()
+        # "nope" falls back to the (hermetic, empty) root hooks -> no tools
+        assert per_agent == {"tools": [], "names": []}
 
 
 def test_chat_streams_tool_then_token_then_done(tool_client):
@@ -230,7 +267,7 @@ def test_chat_agent_name_selects_subdir_hooks(monkeypatch, tmp_path):
 
     def fake_client_factory(cfg):
         class _Fake:
-            def chat(self, messages, tools=None, on_token=None):
+            def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
                 completion = script.pop(0)
                 if on_token is not None and completion.content:
                     on_token(completion.content)
@@ -261,7 +298,7 @@ def test_chat_mid_stream_error_emits_error_event(monkeypatch):
     # `error` event.)
     def fake_client_factory(cfg):
         class _Fake:
-            def chat(self, messages, tools=None, on_token=None):
+            def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
                 raise RuntimeError("boom")
 
         return _Fake()
@@ -324,7 +361,7 @@ def test_chat_agent_switch_mid_session_refires_establishment(tmp_path, monkeypat
 
     def fake_client_factory(cfg):
         class _Fake:
-            def chat(self, messages, tools=None, on_token=None):
+            def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
                 completion = script.pop(0)
                 if on_token is not None and completion.content:
                     on_token(completion.content)
@@ -356,3 +393,189 @@ def test_chat_agent_switch_mid_session_refires_establishment(tmp_path, monkeypat
             assert response.headers["x-session-id"] == sid
             body2 = "".join(response.iter_text())
         assert "2000.0" in body2 and "200.0" not in body2
+
+
+# -- runtime model selection (/config) ----------------------------------------
+
+
+def test_config_get_returns_base_and_current(monkeypatch):
+    from tests.conftest import text_completion
+
+    app, _, mp = _make_app([text_completion("hi")])
+    with TestClient(app) as test_client:
+        with test_client.stream("POST", "/chat", json={"message": "hi"}) as response:
+            sid = response.headers["x-session-id"]
+
+        body = test_client.post(
+            "/config", json={"session_id": sid, "model": "picked-model"}
+        ).json()
+        assert body["ok"] and body["llm"]["model"] == "picked-model"
+
+        got = test_client.get("/config", params={"session_id": sid})
+        assert got.status_code == 200
+        data = got.json()
+        assert data["llm"]["model"] == "picked-model"
+        # base is whatever the session started from (env test-model)
+        assert data["base"]["model"] == "test-model"
+    mp.undo()
+
+
+def test_config_set_changes_the_model_the_session_calls(monkeypatch):
+    from tests.conftest import text_completion
+
+    app, _, mp = _make_app([text_completion("hi"), text_completion("hi")])
+    with TestClient(app) as test_client:
+        with test_client.stream("POST", "/chat", json={"message": "a"}) as response:
+            sid = response.headers["x-session-id"]
+
+        response = test_client.post("/config", json={"session_id": sid, "model": "model-b"})
+        assert response.status_code == 200
+
+        with test_client.stream("POST", "/chat", json={"session_id": sid, "message": "b"}) as _r:
+            fake = app.state.fakes[0]
+        assert fake.last_chat_config is not None
+        assert fake.last_chat_config.model == "model-b"
+    mp.undo()
+
+
+def test_config_set_global_applies_to_live_and_new_sessions(monkeypatch):
+    from tests.conftest import text_completion
+
+    app, _, mp = _make_app([text_completion("hi"), text_completion("hi"), text_completion("hi")])
+    with TestClient(app) as test_client:
+        # one live session exists before we set the global default
+        with test_client.stream("POST", "/chat", json={"message": "a"}) as response:
+            sid = response.headers["x-session-id"]
+        live_fake = app.state.fakes[0]
+
+        # global set: becomes the app default AND applies to the live session
+        response = test_client.post("/config", json={"model": "global-model"})
+        assert response.status_code == 200
+        assert response.json()["llm"]["model"] == "global-model"
+
+        with test_client.stream("POST", "/chat", json={"session_id": sid, "message": "b"}) as _r:
+            pass
+        assert live_fake.last_chat_config.model == "global-model"
+
+        # a NEW session now starts from the global app default
+        with test_client.stream("POST", "/chat", json={"message": "c"}) as _r2:
+            pass
+        assert app.state.fakes[-1].config.model == "global-model"
+    mp.undo()
+
+
+def test_config_set_hook_veto_returns_409_and_keeps_state(monkeypatch):
+    from agent_seed.hooks import Hooks
+    from tests.conftest import text_completion
+
+    def veto(ctx):
+        raise RuntimeError("policy: no model changes")
+
+    app, _, mp = _make_app([text_completion("hi")], hooks=Hooks(on_model_change=veto))
+    with TestClient(app) as test_client:
+        with test_client.stream("POST", "/chat", json={"message": "a"}) as response:
+            sid = response.headers["x-session-id"]
+
+        response = test_client.post("/config", json={"session_id": sid, "model": "model-x"})
+        assert response.status_code == 409
+        assert "policy" in response.json()["error"]
+
+        got = test_client.get("/config", params={"session_id": sid})
+        assert got.json()["llm"]["model"] == "test-model"  # unchanged
+    mp.undo()
+
+
+def test_config_validation_and_unknown_session(monkeypatch):
+    app, _, mp = _make_app([])
+    with TestClient(app) as test_client:
+        assert test_client.post("/config", json={}).status_code == 400
+        # An unknown session_id is treated as "not yet created": POST records a
+        # pending config (200); GET on it reports the pending config (200); GET
+        # on a session with nothing pending is still a 404.
+        assert (
+            test_client.post("/config", json={"model": "m", "session_id": "nope"}).status_code
+            == 200
+        )
+        got = test_client.get("/config", params={"session_id": "nope"})
+        assert got.status_code == 200 and got.json()["llm"]["model"] == "m"
+        assert (
+            test_client.get("/config", params={"session_id": "never-touched"}).status_code == 404
+        )
+    mp.undo()
+
+
+def test_config_set_before_first_message_applies_at_creation(monkeypatch):
+    """Regression: frontends mint a session_id up front, so `/model <name>` can
+    arrive before any /chat. It must be honored, not 404'd."""
+    from tests.conftest import text_completion
+
+    app, _, mp = _make_app([text_completion("hi"), text_completion("hi")])
+    fresh_sid = "pre-minted-session"
+    with TestClient(app) as test_client:
+        # no session exists yet — this is exactly the failing case
+        response = test_client.post(
+            "/config", json={"session_id": fresh_sid, "model": "qwen3.8:27b"}
+        )
+        assert response.status_code == 200
+        assert response.json()["llm"]["model"] == "qwen3.8:27b"
+        # the GET reflects the pending choice too (200, not 404)
+        got = test_client.get("/config", params={"session_id": fresh_sid})
+        assert got.status_code == 200
+        assert got.json()["llm"]["model"] == "qwen3.8:27b"
+
+        # the first /chat creates the session and ADOPTS the pending model
+        with test_client.stream(
+            "POST", "/chat", json={"message": "hi", "session_id": fresh_sid}
+        ) as _r:
+            pass
+        assert app.state.fakes[0].config.model == "qwen3.8:27b"
+        # and the turn ran against it
+        assert app.state.fakes[0].last_chat_config.model == "qwen3.8:27b"
+    mp.undo()
+
+
+def _probe_client_factory(behavior):
+    """A fake OpenAICompatClient whose chat() delegates to behavior."""
+
+    def factory(config):
+        class _Probe:
+            def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+                return behavior(self)
+
+        return _Probe()
+
+    return factory
+
+
+def test_config_test_endpoint_success(monkeypatch):
+    from tests.conftest import text_completion
+
+    app, _, mp = _make_app([])
+    monkeypatch.setattr(
+        "agent_seed.core.OpenAICompatClient",
+        _probe_client_factory(lambda self: text_completion("ok")),
+    )
+    with TestClient(app) as test_client:
+        response = test_client.post("/config/test", json={"model": "probe-model"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is True
+        assert body["model"] == "probe-model"
+        assert body["latency_ms"] is not None
+    mp.undo()
+
+
+def test_config_test_endpoint_failure(monkeypatch):
+    app, _, mp = _make_app([])
+
+    def boom(self):
+        raise RuntimeError("boom probe")
+
+    monkeypatch.setattr("agent_seed.core.OpenAICompatClient", _probe_client_factory(boom))
+    with TestClient(app) as test_client:
+        response = test_client.post("/config/test", json={"model": "bad-model"})
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ok"] is False
+        assert "boom probe" in body["error"]
+    mp.undo()

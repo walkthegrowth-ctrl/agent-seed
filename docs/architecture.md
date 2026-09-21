@@ -32,26 +32,32 @@ request.
 
 ## Data flow for one turn
 
-1. Frontend `POST /chat {message, session_id?}`.
+This is the one-sentence version. The full hook-by-hook lifecycle (establishment
+hooks, the per-round tool loop, `prepare`/`finish`, and the per-agent boundary
+hooks) lives in `manual.md` — treat it as the source of truth:
+
+1. Frontend `POST /chat {message, session_id?, agent_name?}`.
 2. Backend looks up (or creates) the `Agent` for that session and streams.
-3. `Agent.chat()` appends the user message and calls the LLM with the tool
-   schemas.
-4. If the LLM returns `tool_calls`, the core executes each via the registry,
-   appends the `tool` role messages, and loops back to step 3.
-5. When the LLM returns plain text, that is the final answer.
-6. Each streamed content token → `event: token`, each executed tool →
-   `event: tool`, termination → `event: done`.
+3. `Agent.chat()` appends the user message, then per round it (a) rebuilds
+   the per-request `messages` / `tools` view from the run's history and the
+   agent's whitelist, (b) runs the LLM, and (c) executes any tool calls the
+   LLM returned, before looping back.
+4. When the LLM returns plain text, `prepare` / `finish` run and the final
+   text is returned.
+5. The SSE mapping is the one thing the architecture cares about: each
+   streamed content token → `event: token`, each executed tool →
+   `event: tool`, termination → `event: done` (see `protocol.md`).
 
 ## Module responsibilities
 
 | path | responsibility |
 |------|----------------|
-| `agent_seed/core.py` | `Agent`: history, tool loop, round-trip cap. Talks to LLM + registry. No I/O besides the two interfaces it is given. |
+| `agent_seed/core.py` | `Agent`: history, tool loop, round-trip cap. Talks to LLM + registry. No I/O besides the two interfaces it is given. Owns model selection: `set_model` (gated by `on_model_change`), `test_model`, `model_config`; passes `ctx.current_model` into every LLM call. |
 | `agent_seed/hooks.py` | `Hooks` + `RunContext`: the stable, extensible point of the core. See `manual.md`. |
 | `agent_seed/discovery.py` | Auto-loads promoted hook modules from `hook_modules/` (once per process, cached; fail-fast). Resolves an `agent_name` to a subdirectory (`hook_modules/<name>/`) with the root as the default. |
-| `agent_seed/llm.py` | `OpenAICompatClient`: streaming `POST /chat/completions`, SSE line parsing, chunk folding. `LLMConfig.from_env`. |
+| `agent_seed/llm.py` | `OpenAICompatClient`: streaming `POST /chat/completions`, SSE line parsing, chunk folding. `chat(..., config=None, max_tokens=None)` resolves a per-call config. `LLMConfig` (frozen) + `from_env` + `with_updates`; `LLMProbe`. |
 | `agent_seed/tools.py` | `ToolRegistry`, `@tool`, JSON-schema generation from annotations, and the starter `calculator`. |
-| `agent_seed/backends/http/server.py` | FastAPI app, session store, `POST /chat` SSE, `GET /tools`, `GET /agents`, `GET /config`, `GET /health`, `POST /reset`. |
+| `agent_seed/backends/http/server.py` | FastAPI app, session store, `POST /chat` SSE, `GET /tools`, `GET /agents`, `GET /config` (+ `POST /config`, `POST /config/test` for runtime model selection), `GET /health`, `POST /reset`. |
 | `agent_seed/backends/http/cli.py` | `agent-seed` entry point (uvicorn). |
 | `agent_seed/frontends/repl/app.py` | `Session` (HTTP client), SSE parse + render, slash-commands. |
 | `agent_seed/frontends/repl/cli.py` | `agent-repl` entry point. |

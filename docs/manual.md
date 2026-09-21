@@ -25,7 +25,7 @@ Companion documents:
 - [Hooks — the extension surface](#hooks--the-extension-surface)
   - [What a hook is](#what-a-hook-is)
   - [The full list of hooks (reference)](#the-full-list-of-hooks-reference)
-  - [The four levels](#the-four-levels)
+  - [Scopes of one run and their fields](#scopes-of-one-run-and-their-fields)
   - [Reading the Agent's state](#reading-the-agents-state)
   - [The three lifetimes inside a `RunContext`](#the-three-lifetimes-inside-a-runcontext)
   - [Lifecycle](#lifecycle)
@@ -228,6 +228,7 @@ all the rest fire inside `chat()`.
 |------|---------------|--------------------|---------|------------------------------|---------------------------|-------------|
 | `enter_agent` | `Agent(...)` construction (first activation) and on every switch to this agent | `Agent(agent_name=...)`, `set_agent_name()`, `POST /chat agent_name`, `/agent` | incoming agent | `agent_name`(new) | always an agent in place; RAII — pairs with a prior exit except at ctor; fires before that agent's establishment; fires for the main (None) agent too | initialize on takeover: load config, seed per-agent state |
 | `exit_agent` | every switch away from this agent (never at construction) | `set_agent_name()`, `POST /chat agent_name`, `/agent` | outgoing agent | `agent_name`(old) | raises → switch aborts (atomic); never fires at ctor | clean up, persist, release |
+| `on_model_change` | `Agent.set_model()` (never at construction) | `Agent.set_model()`, `POST /config` | active agent | `current_model`(new) | raises → change rolled back (atomic); fires after commit | gate / substitute / restore the model |
 | `initialize_run` | first `chat()`, and again after any switch (once run not established) | core, on need | active agent | may set `run_id` | exactly once per (re)establishment | seed run identity / persistence key |
 | `ready_run` | right after `initialize_run` (run guaranteed) | core, on need | active agent | read `run_id`, `extras` | once per (re)establishment | attach budget / memory |
 | `initialize_session` | first `chat()`, `set_session`, and after any switch | core / caller on session change | active agent | may set `session_id` | on each session (re)establishment | seed / migrate per-session state |
@@ -248,22 +249,26 @@ Rules of thumb:
 - **Append-only.** All slots default to `None`; adding a slot is a minor
   change (existing hooks keep working). See ["Rules"](#rules-the-stability-contract).
 
-### The four levels
+### Scopes of one run and their fields
 
 A **run** is one instantiation of `Agent` (one conversation driver). It is
 synchronous, serves a single user, and owns **one** `RunContext` for its whole
 life. A run drives **one active session at a time**; it may *switch* sessions
 (see `Agent.set_session`), but never runs two at once. `run_id` exists for
 debugging, logging, and future parallel runs — today it is 1:1 with the
-`Agent`.
+`Agent`. A run scopes state at four granularities, mapping to these fields:
 
-| level           | field             | meaning                                        | set by                                            |
-|-----------------|-------------------|------------------------------------------------|---------------------------------------------------|
-| **run**         | `run_id`          | one `Agent` lifetime                           | caller; else core auto-gens at establishment      |
-| **run**         | `agent_name`      | which hooks subdirectory is active             | caller (ctor or `set_agent_name`); `None` = default |
-| **session**     | `session_id`      | the conversation currently being driven        | caller; else core auto-gens at establishment      |
-| **turn**        | `turn`            | one user message (1-based run counter)         | core                                              |
-| **tool_loop**   | `tool_loop_round` | one LLM→tools iteration within a turn (0-based)| core                                              |
+| scope         | field             | meaning                                        | set by                                            |
+|---------------|-------------------|------------------------------------------------|---------------------------------------------------|
+| **run**       | `run_id`          | one `Agent` lifetime                           | caller; else core auto-gens at establishment      |
+| **run**       | `agent_name`      | which hooks subdirectory is active             | caller (ctor or `set_agent_name`); `None` = default |
+| **session**   | `session_id`      | the conversation currently being driven        | caller; else core auto-gens at establishment      |
+| **turn**      | `turn`            | one user message (1-based run counter)         | core                                              |
+| **tool loop** | `tool_loop_round` | one LLM→tools iteration within a turn (0-based)| core                                              |
+
+(The terms *run*, *session*, *turn*, *tool loop round* are defined in the
+[Glossary](#glossary); this table is just their field mapping, so the section
+name no longer implies a hierarchy the code does not have.)
 
 ### Reading the Agent's state
 
@@ -278,19 +283,21 @@ for the session / agent — not by writing these):
 | `agent.session_id`    | the active session id |
 | `agent.base_prompt`   | the immutable system prompt for the run |
 | `agent.system_prompt` | the current system prompt (sticky; a hook may have changed it) |
+| `agent.model_config`  | the model the core currently calls (= `ctx.current_model`); see [Model selection](#model-selection-dynamic-sticky) |
 | `agent.history`       | the stored message list (every turn so far) |
 | `agent.context`       | the full `RunContext` (run-scoped fields + the per-request fields of the last `chat()`) |
 
-### The three lifetimes inside a `RunContext`
+### The three categories of a `RunContext`
 
-This is the most important part of the model. A `RunContext` has **three
-lifetimes** for its fields, and the core treats each differently:
+This is the most important part of the model. A `RunContext` falls into
+**three groups**, and the core treats each differently (the same split
+`hooks.py`'s docstring uses — see `agent_seed/hooks.py`):
 
-| | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          |
-|---|----------------------------------------|--------------------------------------------------|
-| fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` |
-| core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round |
-| hook behavior | may read; may write once → the change **persists** ("sticky") until changed again | may read / rewrite *for this request only* |
+| | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          | **working state** (set by the core / a tool call or turn) |
+|---|----------------------------------------|--------------------------------------------------|------------------------------------------------------------|
+| fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `base_model`, `current_model`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` | `tool_call`, `tool_result`, `final_answer` |
+| core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round | `tool_call`/`tool_result` are set for one tool call; `final_answer` is set once per turn in `_finish_turn` |
+| hook behavior | may read; may write once → the change **persists** ("sticky") until changed again | may read / rewrite *for this request only* | read the call's data; rewrite `tool_result` (via `after_tool_call`) or `final_answer` (via `prepare`/`finish`) — not persisted beyond the call / turn |
 
 Consequences a hook can rely on:
 
@@ -340,9 +347,9 @@ chat() begins  (turn N of the run)
  │   │         ├─ [core executes the tool]
  │   │         └─ after_tool_call(ctx)      # rewrite ctx.tool_result
  │   │   [core appends history entries]
-│   └─ on_round(ctx)                   # fire-only observability
-├─ prepare(ctx)              # ctx.final_answer is set; validate / normalize
-└─ finish(ctx)               # LAST word; may rewrite ctx.final_answer
+ │   └─ on_round(ctx)                   # fire-only observability
+ ├─ prepare(ctx)              # ctx.final_answer is set; validate / normalize
+ └─ finish(ctx)               # LAST word; may rewrite ctx.final_answer
 chat() ends —> the core returns ctx.final_answer
 ```
 
@@ -373,6 +380,8 @@ class RunContext:
     base_prompt: str | None     # immutable for the run — the original system prompt
     system_prompt: str | None   # CURRENT prompt; sticky; hook-editable (see below)
     allowed_tools: list | None  # strict tool whitelist; sticky; hook-set (see below)
+    base_model: LLMConfig | None  # immutable; the LLM the Agent was built with (restore target)
+    current_model: LLMConfig | None  # sticky; the LLM the core actually calls (hook-owned)
     turn: int                   # core-managed, 1-based, reset by Agent.reset()
     usage: dict                 # cumulative from the LLM client across the run
     extras: dict                # HOOKS ONLY — flat keys, run-scoped
@@ -459,6 +468,69 @@ def before_llm(ctx):
 
 `experiments/system_prompt.py` is a working example (dynamic addendum + a
 `ready_session` hook that seeds per-session state in `extras`).
+
+**Who may write `ctx.system_prompt` — the same contract as
+`ctx.base_prompt` → `ctx.system_prompt`.** Any hook can write the field (it
+is a dataclass field, not a signature), but the core applies it *after*
+`before_llm` on every LLM call — so:
+
+- **`before_llm`** is the canonical *round* writer: the value you set there is
+  the one that goes out on this request, and (because it's sticky) it carries
+  to the next round until someone overwrites it.
+- **`enter_agent`** is the canonical *switch-time* writer for an agent that
+  specialises its prompt (the subagent pattern, mirroring the
+  [Model selection](#model-selection-dynamic-sticky) example).
+- **Any other slot** is legal but discouraged: the change survives turns, so
+  a `finish` hook that sets the prompt is effectively a per-turn writer.
+
+Later writers win. The "recompute from `ctx.base_prompt`" pattern (above) is the
+stable, self-healing way to do per-turn work without drift.
+
+#### Model selection (dynamic, sticky)
+
+The core calls exactly one LLM per request: **`ctx.current_model`** — the
+single source of truth, mirroring `ctx.system_prompt`. Its immutable reference,
+`ctx.base_model`, is the config the `Agent` was built with (usually the
+environment's). Both follow the base/current pattern:
+
+```python
+def restore_current_to_base(ctx: RunContext) -> None:
+    ctx.current_model = ctx.base_model  # the canonical "back to default"
+```
+
+**Who may write `ctx.current_model` — a strict order of priority** (later
+overrides earlier):
+
+1. Environment — seeds `base_model` at construction only. No runtime authority.
+2. The active agent's `enter_agent` — its specialization; it may rebind the
+   model (see the subagent example below). Sticky until overwritten.
+3. `Agent.set_model(cfg)` — the user channel (REPL/API). Commits the value,
+   fires the active agent's `on_model_change`, which may mutate (substitute,
+   restore to `base_model`) or **raise to veto** (rollback; the exception is
+   re-raised to the caller). See `Agent.set_model` and `on_model_change` for
+   the full contract.
+4. `before_llm` — per round, unconditional. The hook always wins at request
+   time; this is the "hooks never lose control" guarantee.
+
+**Stickiness & agent switches.** `current_model` survives `set_agent_name` and
+`reset()`. Unlike `allowed_tools`, the core **never resets it on a switch** —
+the incoming agent's `enter_agent` decides if it wants to rebind.
+
+```python
+# agent specialization: a "math" agent that insists on a strong model
+def enter_agent(ctx: RunContext) -> None:
+    ctx.allowed_tools = ["calculator"]
+    ctx.current_model = LLMConfig(base_url="http://...", model="qwen3:32b")
+```
+
+**`Agent.test_model(cfg)`** runs one minimal ping completion (`max_tokens=1`)
+with a throwaway client and returns an `LLMProbe(ok, error, latency_ms,
+usage)`. It is a diagnostic: a probe failure is a *finding*, not a *change*.
+Use `set_model` for a gated change.
+
+**HTTP/REPL surface.** `POST /config` (session-scoped or global),
+`POST /config/test`, and the REPL's `/model` command (see `protocol.md` for
+shapes).
 
 ### Hook modules and the two folders
 
@@ -748,6 +820,9 @@ re-fires establishment on the next `chat()`, mirroring `set_session`.
 | clean up / persist state when an agent is displaced | `exit_agent`    | runs as the outgoing agent; `ctx.agent_name` = old value (RAII pair with `enter_agent`) |
 | initialize state when an agent takes over     | `enter_agent`       | runs as the incoming agent; `ctx.agent_name` = new value; fires on construction too |
 | declare this agent's tools (strict whitelist) | `enter_agent`       | set `ctx.allowed_tools` (sticky; the core offers only these and vetoes the rest) |
+| specialize this agent's model                 | `enter_agent`       | set `ctx.current_model` (sticky; survives switches unless a hook changes it) |
+| restore the default model on takeover         | `enter_agent` / `before_llm` | `ctx.current_model = ctx.base_model` |
+| gate / veto a model change (set_model)        | `on_model_change`   | mutate `ctx.current_model` or raise to veto (rolled back) |
 | override / extend / patch the system prompt   | `before_llm`        | read `ctx.base_prompt` + set `ctx.system_prompt` (sticky) |
 | inject RAG / context / date into the next LLM call only | `before_llm` | append to `ctx.messages` (per-request — history is not touched) |
 | disable tools for one call                      | `before_llm`        | `ctx.tools.clear()` |
@@ -901,6 +976,18 @@ Breaking any of these is a **major** change.
     — there is no inheritance or "always-on" base set. A hook may *narrow* a
     call (`before_tool_call`) or change this round's offer (`ctx.tools`), but
     it can never *re-allow* a tool the whitelist already rejected.
+13. **Model change is a gated, atomic commit.** The run's LLM is
+    `ctx.current_model` (a sticky run-scoped field, seeded from
+    `ctx.base_model` at construction). The only sanctioned way for a
+    *user-facing* change to be committed is `Agent.set_model(candidate)`,
+    which sets the value **then** fires `on_model_change` (the hook may
+    substitute or `raise` to veto — `raise` rolls the value back and
+    re-raises, mirroring the "atomic" boundary hook). A hook's own
+    `ctx.current_model = ctx.base_model` in `enter_agent` / `before_llm` is
+    a *specialisation / restore* pattern, not a user-facing commit — it
+    bypasses `on_model_change` by construction (it is a per-agent binding,
+    not a mid-turn switch). The core **never** resets `current_model` on a
+    switch or `reset()`; only the incoming agent's hooks may.
 
 ### Extending the core with new slots
 
@@ -1041,6 +1128,19 @@ A: Yes. Each frontend mints or supplies a `session_id`; the backend keys the
 `session_id → Agent` map on it. There's no shared state between sessions beyond
 the in-memory map.
 
+**Q: Can I switch the model at runtime — mid-session, per-session, or for sub-agents?**
+A: Yes. The model the core actually calls is `ctx.current_model` (a sticky
+run-scoped field); its immutable reference is `ctx.base_model`. Three channels
+write it, in ascending priority: the environment (boot seed only), the active
+agent's `enter_agent` (specialization), and `Agent.set_model(cfg)` (user / API,
+gated by the `on_model_change` hook, which may mutate it or raise to veto).
+`before_llm` still wins per round, so hooks retain final control. Switches are
+session-scoped: `current_model` is sticky across `set_agent_name` and
+`reset()` — the core never resets it, an agent that wants the default re-runs
+`ctx.current_model = ctx.base_model` itself. Use `Agent.test_model(cfg)` to
+probe a candidate without committing (it is a diagnostic, not a change).
+See "Model selection (dynamic, sticky)" and `protocol.md` (`POST /config`).
+
 ---
 
 ## Glossary
@@ -1056,6 +1156,14 @@ the in-memory map.
 - **base prompt** — `ctx.base_prompt`: the immutable original system prompt for
   the run. Always available to hooks; use it as the source when computing a
   new `ctx.system_prompt`.
+- **base model** — `ctx.base_model`: the immutable `LLMConfig` the `Agent` was
+  built with. The canonical restore target
+  (`ctx.current_model = ctx.base_model`).
+- **current model** — `ctx.current_model`: the sticky `LLMConfig` the core
+  actually calls; the single source of truth per request. Written by the
+  active agent's `enter_agent`, `Agent.set_model` (gated by
+  `on_model_change`), and `before_llm` (per round, final word). Survives
+  agent switches and `reset()` — the core never resets it.
 - **allowed_tools** — `ctx.allowed_tools`: the sticky strict whitelist of tool
   names the active agent may offer and call. Set by the agent's `enter_agent`
   hook (or any other hook; sticky until overwritten). The core enforces it at
@@ -1076,6 +1184,12 @@ the in-memory map.
 - **main agent** — the nameless agent backed by the `hook_modules/` root
   (`agent_name=None`). The default and the agent on the wheel until one is
   selected; "no agent" is not a state.
+- **on_model_change** — the model-selection boundary hook (Agent-lifetime, like
+  `enter_agent` / `exit_agent`): fires from `Agent.set_model` *after* the new
+  value is committed to `ctx.current_model`. May mutate it (substitute a model,
+  restore `ctx.base_model`) or **raise to veto** — which rolls the change back
+  and re-raises. A per-round override is `before_llm`'s job; this slot only
+  guards the *commit*.
 - **extras** — `ctx.extras`: a flat dict owned by hooks. The core never reads
   or writes it. Survives across turns and `Agent.reset()`.
 - **hook** — a `(ctx: RunContext) -> None` function attached to a fixed slot in

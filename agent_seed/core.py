@@ -17,13 +17,14 @@ LLM call from the current history.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
 
 from .discovery import get_hooks_for_agent
 from .hooks import Hooks, RunContext
-from .llm import LLMConfig, OpenAICompatClient
+from .llm import LLMConfig, LLMProbe, OpenAICompatClient
 from .tools import ToolError, ToolRegistry
 from .tools import registry as default_registry
 
@@ -34,6 +35,11 @@ DEFAULT_SYSTEM_PROMPT = (
     "Use the provided tools whenever they can produce an answer you "
     "are not certain about (e.g. arithmetic)."
 )
+
+
+def _elapsed_ms(start: float) -> float:
+    """Milliseconds since a monotonic clock reading (one decimal place)."""
+    return round((time.monotonic() - start) * 1000.0, 1)
 
 
 class Agent:
@@ -82,6 +88,14 @@ class Agent:
         # current (potentially hook-modified) value.
         ctx.base_prompt = system_prompt
         ctx.system_prompt = system_prompt
+        # Establish the models served by this run. base_model is the
+        # immutable reference (what the caller's client was built with);
+        # current_model starts equal and is what the core actually calls.
+        # enter_agent (below) may already rebind current_model — the
+        # sub-agent-specialization case; base_model stays for restoring.
+        client_cfg = getattr(client, "config", None)
+        ctx.base_model = client_cfg
+        ctx.current_model = client_cfg
         self._context = ctx
 
         # First activation: the agent on the driver seat takes over. There is
@@ -103,6 +117,32 @@ class Agent:
         per-agent whitelist (see ``docs/manual.md`` "Per-agent tool access").
         """
         return cls(OpenAICompatClient(LLMConfig.from_env(env)), registry or default_registry)
+
+    @classmethod
+    def test_model(cls, candidate: LLMConfig) -> LLMProbe:
+        """Probe a candidate model config without touching any agent state.
+
+        One minimal chat completion (one ping message, ``max_tokens=1``) on a
+        throwaway client. A probe is a diagnostic: it does not go through
+        ``on_model_change`` (a probe failing is a *finding*, not a *change*),
+        so use :meth:`set_model` when a change should be gated by the active
+        agent. Any failure — config error, HTTP error, timeout — is reported
+        as ``ok=False`` with the error text, never raised.
+        """
+        start = time.monotonic()
+        try:
+            client = OpenAICompatClient(candidate)
+            completion = client.chat(
+                [{"role": "user", "content": "ping"}],
+                max_tokens=1,
+            )
+        except Exception as exc:  # noqa: BLE001 - probe boundary
+            return LLMProbe(ok=False, error=str(exc), latency_ms=_elapsed_ms(start))
+        return LLMProbe(
+            ok=True,
+            latency_ms=_elapsed_ms(start),
+            usage=completion.usage,
+        )
 
     # ------------------------------------------------------------------
     # public accessors
@@ -135,6 +175,11 @@ class Agent:
     def agent_name(self) -> str | None:
         """The active agent name (``None`` = the main / root agent)."""
         return self._context.agent_name
+
+    @property
+    def model_config(self) -> LLMConfig | None:
+        """The LLM this run currently calls (``RunContext.current_model``)."""
+        return self._context.current_model
 
     @property
     def context(self) -> RunContext:
@@ -184,6 +229,10 @@ class Agent:
         / ``initialize_session`` / ``ready_session``) then re-fire on the next
         ``chat()`` — so the full order is ``exit -> enter -> establishment``.
         History, ``run_id``, ``session_id``, and ``extras`` are left alone.
+        Unlike ``allowed_tools``, ``current_model`` is sticky across the
+        switch: the core does not reset it. An agent that wants to specialize
+        (or restore the default) must say so in its ``enter_agent`` /
+        ``before_llm`` — e.g. ``ctx.current_model = ctx.base_model``.
         """
         if agent_name == self._context.agent_name:
             return
@@ -208,6 +257,34 @@ class Agent:
             self.hooks.enter_agent(self._context)
         self._run_established = False
         self._session_established = False
+
+    def set_model(self, candidate: LLMConfig) -> LLMConfig:
+        """Switch this run's model (what the core calls from now on).
+
+        The commit is gated by the active agent's ``on_model_change`` hook:
+
+        - if ``candidate`` equals the current model, nothing happens (no-op).
+        - otherwise ``ctx.current_model`` is set to ``candidate`` and the hook
+          fires (its ``ctx`` already carries the new value). The hook may
+          re-mutate ``ctx.current_model`` (substitute a model, restore
+          ``ctx.base_model``) or **raise to veto** — which aborts the switch:
+          ``current_model`` is rolled back and the exception re-raised.
+        - ``ctx.base_model`` is never touched; restoring it is the hook's job
+          (``ctx.current_model = ctx.base_model``).
+
+        Returns the effective model after the hook.
+        """
+        previous = self._context.current_model
+        if candidate == previous:
+            return candidate
+        self._context.current_model = candidate
+        if self.hooks.on_model_change is not None:
+            try:
+                self.hooks.on_model_change(self._context)
+            except Exception:
+                self._context.current_model = previous
+                raise
+        return self._context.current_model
 
     # ------------------------------------------------------------------
     # internal establishment logic
@@ -299,6 +376,7 @@ class Agent:
                 ctx.messages,
                 tools=ctx.tools or None,
                 on_token=on_token,
+                config=ctx.current_model,
             )
             if completion.usage:
                 ctx.usage.update(completion.usage)
@@ -380,7 +458,12 @@ class Agent:
         ctx.messages = [{"role": "system", "content": ctx.system_prompt or ""}]
         ctx.messages.extend(self.history)
         ctx.tools = []
-        completion = self.client.chat(ctx.messages, tools=None, on_token=on_token)
+        completion = self.client.chat(
+            ctx.messages,
+            tools=None,
+            on_token=on_token,
+            config=ctx.current_model,
+        )
         if completion.usage:
             ctx.usage.update(completion.usage)
         return self._finish_turn(ctx, completion.content)

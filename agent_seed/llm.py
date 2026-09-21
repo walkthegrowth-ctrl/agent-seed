@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - dotenv is a hard dep in practice
 class LLMConfigError(RuntimeError): ...
 
 
-@dataclass
+@dataclass(frozen=True)
 class LLMConfig:
     base_url: str
     api_key: str
@@ -42,6 +42,38 @@ class LLMConfig:
         if not model:
             raise LLMConfigError("LLM_MODEL is not set. Copy .env.example to .env and set it.")
         return cls(base_url=base_url, api_key=api_key, model=model)
+
+    def with_updates(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout: float | None = None,
+    ) -> LLMConfig:
+        """Return a copy with the given fields replaced (None = keep current).
+
+        The resulting ``model`` must be non-empty: a config without a model is
+        invalid and would fail only at the (remote) LLM endpoint.
+        """
+        next_model = self.model if model is None else model
+        if not next_model:
+            raise LLMConfigError("refusing to apply an LLM config with an empty model")
+        return self.__class__(
+            base_url=self.base_url if base_url is None else base_url.rstrip("/"),
+            api_key=self.api_key if api_key is None else api_key,
+            model=next_model,
+            timeout=self.timeout if timeout is None else timeout,
+        )
+
+
+@dataclass
+class LLMProbe:
+    """Outcome of one minimal "does this config work" chat probe."""
+
+    ok: bool
+    error: str | None = None
+    latency_ms: float | None = None
+    usage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -130,12 +162,20 @@ class OpenAICompatClient:
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         on_token: Callable[[str], None] | None = None,
+        config: LLMConfig | None = None,
+        max_tokens: int | None = None,
     ) -> Completion:
-        """Run one chat completion, streaming tokens; returns the full Completion."""
+        """Run one chat completion, streaming tokens; returns the full Completion.
+
+        ``config`` overrides this client's default for this call only (the core
+        passes the run's current model from ``RunContext.current_model``);
+        ``max_tokens`` caps the response (set by ``Agent.test_model`` probes).
+        """
         import httpx
 
+        cfg = config or self.config
         payload: dict[str, Any] = {
-            "model": self.config.model,
+            "model": cfg.model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
@@ -143,15 +183,17 @@ class OpenAICompatClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
 
         events: list[dict[str, Any]] = []
         with (
-            httpx.Client(timeout=self.config.timeout) as client,
+            httpx.Client(timeout=cfg.timeout) as client,
             client.stream(
                 "POST",
-                f"{self.config.base_url}/chat/completions",
+                f"{cfg.base_url}/chat/completions",
                 headers={
-                    "Authorization": f"Bearer {self.config.api_key}",
+                    "Authorization": f"Bearer {cfg.api_key}",
                     "Content-Type": "application/json",
                 },
                 content=json.dumps(payload).encode(),

@@ -27,9 +27,6 @@ Notes:
   core resets ``allowed_tools`` to ``None`` on each switch BEFORE the
   incoming agent's hooks fire, so a switched-to agent that declares nothing
   genuinely sees no tools.
-* ``make_allow_all(names)`` builds a hooks whose ``enter_agent`` whitelists an
-  explicit set (e.g. the whole registered toolset). It is a convenience
-  factory, *not* a second discovery entrypoint — discovery only uses ``make()``.
 * Hook-level veto (``before_tool_call``) still works to *narrow* an allowed
   call further, but it never runs for a name the whitelist already rejected —
   the core settles that first.
@@ -50,15 +47,3 @@ def _enter_agent(ctx: RunContext) -> None:
 
 def make() -> Hooks:
     return Hooks(enter_agent=_enter_agent)
-
-
-def make_allow_all(names: list[str]) -> Hooks:
-    """A variant that whitelists an explicit set (e.g. the whole toolset).
-
-    Usage: ``make_allow_all(["calculator", "weather"])``.
-    """
-
-    def _enter(ctx: RunContext) -> None:
-        ctx.allowed_tools = list(names)
-
-    return Hooks(enter_agent=_enter)

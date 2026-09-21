@@ -23,7 +23,9 @@ Two things are defined here:
     ``run_id``, ``session_id``, ``agent_name``, ``turn``, ``base_prompt``
     (immutable), ``system_prompt`` (sticky — a hook change holds until
     changed again), ``allowed_tools`` (sticky — a hook change holds until
-    changed again), cumulative ``usage``, and ``extras``.
+    changed again), ``base_model`` (immutable) and ``current_model`` (sticky
+    — the model the core actually calls; hooks own its value, and the core
+    never resets it on an agent switch), cumulative ``usage``, and ``extras``.
   - *per-request* fields are rebuilt by the core on each LLM call:
     ``messages``, ``tools``, ``tool_loop_round``.
   - *per-call* fields are set for each tool call or turn:
@@ -48,6 +50,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
+
+from .llm import LLMConfig
 
 # One hook is just a callable taking the shared run context and returning
 # nothing: any work it wants to do happens via mutation of ``ctx``.
@@ -107,6 +111,19 @@ class RunContext:
     # like system_prompt: a change holds across turns until changed again.
     allowed_tools: list[str] | None = None
 
+    # -- model selection (run-scoped) ----------------------------------------
+    # base_model: the LLM established for the run (the one the Agent's client
+    # was built with); immutable after construction. Any hook can always see
+    # the original and restore it: ctx.current_model = ctx.base_model.
+    # current_model: the LLM the core CALLS — the sticky value resolved from
+    # ctx.current_model on every LLM call. Hook-owned: Agent.set_model commits
+    # a change (firing on_model_change, which may mutate or veto it), the active
+    # agent's enter_agent may bind its own, and before_llm may override per
+    # round. It survives agent switches and reset() — the core never resets it;
+    # a hook that wants a switch to mean "back to default" must say so itself.
+    base_model: LLMConfig | None = None
+    current_model: LLMConfig | None = None
+
     # -- core-managed counters -----------------------------------------------
     turn: int = 0  # user messages in this run (1-based; the core increments)
     tool_loop_round: int = 0  # LLM → tools iterations in this turn (per-turn)
@@ -145,6 +162,14 @@ class Hooks:
     # agent) — never at construction. On a switch: exit(old) -> enter(new).
     enter_agent: Hook | None = None  # incoming agent takes over; ctx.agent_name = NEW value
     exit_agent: Hook | None = None  # outgoing agent leaves; ctx.agent_name = OLD value
+
+    # Model-selection boundary (Agent-lifetime, like enter_agent/exit_agent):
+    # fires from Agent.set_model AFTER the new value is committed to
+    # ctx.current_model. May mutate ctx.current_model (e.g. substitute a model,
+    # restore ctx.base_model) or RAISE to veto the change — the core rolls back
+    # to the previous value and re-raises, exactly like exit_agent aborting an
+    # agent switch.
+    on_model_change: Hook | None = None
 
     # Identity establishment (run before session, in this order).
     initialize_run: Hook | None = None  # may set ctx.run_id
