@@ -157,11 +157,11 @@ class _RecResp:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            import httpx
+            import httpx2
 
-            req = httpx.Request("POST", "http://fake.invalid")
-            resp = httpx.Response(self.status_code, request=req, content=b"backend boom")
-            raise httpx.HTTPStatusError("backend error", request=req, response=resp)
+            req = httpx2.Request("POST", "http://fake.invalid")
+            resp = httpx2.Response(self.status_code, request=req, content=b"backend boom")
+            raise httpx2.HTTPStatusError("backend error", request=req, response=resp)
 
 
 def test_session_set_model_sends_session_and_model():

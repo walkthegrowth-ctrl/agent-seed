@@ -71,7 +71,7 @@ no auth, single-user by design — see below.
 
 ## Design decisions & boundaries
 
-- **Raw `httpx`, no LLM SDK.** One fewer dependency; works with any
+- **Raw `httpx2`, no LLM SDK.** One fewer dependency; works with any
   OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, OpenRouter, ...).
 - **Tool schemas built from type hints.** No pydantic for tool input; a small
   `type_to_schema` maps `str/int/float/bool`, `list[T]`, `dict`, `Any`.

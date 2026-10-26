@@ -1,6 +1,6 @@
 """Thin streaming client for OpenAI-compatible /chat/completions.
 
-No SDK: plain httpx + manual SSE line parsing so any compatible
+No SDK: plain httpx2 + manual SSE line parsing so any compatible
 endpoint (Ollama, LM Studio, OpenRouter, vLLM, ...) works.
 """
 
@@ -95,7 +95,7 @@ class Completion:
 def parse_sse_line(line: str | bytes) -> dict[str, Any] | None:
     """Parse one SSE line; None for non-data lines, empty payloads, or [DONE].
 
-    Accepts str or bytes: httpx's iter_lines() yields str, but callers may
+    Accepts str or bytes: httpx2's iter_lines() yields str, but callers may
     hand over raw bytes.
     """
     if isinstance(line, bytes):
@@ -171,7 +171,7 @@ class OpenAICompatClient:
         passes the run's current model from ``RunContext.current_model``);
         ``max_tokens`` caps the response (set by ``Agent.test_model`` probes).
         """
-        import httpx
+        import httpx2
 
         cfg = config or self.config
         payload: dict[str, Any] = {
@@ -188,7 +188,7 @@ class OpenAICompatClient:
 
         events: list[dict[str, Any]] = []
         with (
-            httpx.Client(timeout=cfg.timeout) as client,
+            httpx2.Client(timeout=cfg.timeout) as client,
             client.stream(
                 "POST",
                 f"{cfg.base_url}/chat/completions",

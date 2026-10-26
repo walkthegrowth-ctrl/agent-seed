@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Iterator
 from typing import Any
 
-import httpx
+import httpx2
 from prompt_toolkit import prompt
 from prompt_toolkit.history import FileHistory
 from rich.console import Console
@@ -68,7 +68,7 @@ def sse_events_streaming(
     """Yield (event, data) as each SSE event completes (blank line).
 
     Streaming-aware counterpart to sse_events: works on a live iterator
-    of lines (e.g. httpx iter_lines()) so events surface as they arrive
+    of lines (e.g. httpx2 iter_lines()) so events surface as they arrive
     instead of after the whole body has been buffered.
     """
     event = "message"
@@ -94,7 +94,7 @@ class Session:
         self.timeout = timeout
         self.session_id = uuid.uuid4().hex
         self.agent_name: str | None = None
-        self.client = httpx.Client(timeout=timeout)
+        self.client = httpx2.Client(timeout=timeout)
 
     # -- backend calls ------------------------------------------------------
 
@@ -140,7 +140,7 @@ class Session:
             )
             if response.status_code == 200:
                 return response.json()
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             pass
         return self._server_config()
 
@@ -149,7 +149,7 @@ class Session:
             response = self.client.get(f"{self.url}/config")
             if response.status_code == 200:
                 return response.json()
-        except httpx.HTTPError:
+        except httpx2.HTTPError:
             pass
         return None
 
@@ -176,7 +176,7 @@ class Session:
         with self.client.stream("POST", f"{self.url}/chat", json=payload) as response:
             if response.status_code != 200:
                 body = response.read().decode("utf-8", "replace")
-                raise httpx.HTTPStatusError(
+                raise httpx2.HTTPStatusError(
                     f"backend returned {response.status_code}: {body}",
                     request=response.request,
                     response=response,
@@ -236,7 +236,7 @@ class Repl:
         try:
             session = Session(self.url)
             session.client.get(f"{session.url}/health", timeout=5)
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             raise BackendError(self.url, str(exc)) from exc
         return session
 
@@ -343,7 +343,7 @@ class Repl:
             if not first:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             CONSOLE.print(f"[bold red]backend error:[/] {exc}")
 
     # -- slash commands ------------------------------------------------------
@@ -414,7 +414,7 @@ class Repl:
         """Run a pure probe (``/model test``) and report the outcome."""
         try:
             result = session.test_model(unquote(model), unquote(base_url) if base_url else None)
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             CONSOLE.print(f"[bold red]error:[/] {exc}")
             return
         if result.get("ok"):
@@ -431,7 +431,7 @@ class Repl:
         if probe:
             try:
                 result = session.test_model(model, base_url)
-            except httpx.HTTPError as exc:
+            except httpx2.HTTPError as exc:
                 CONSOLE.print(f"[bold red]error:[/] {exc}")
                 return
             if not result.get("ok"):
@@ -445,7 +445,7 @@ class Repl:
                 return
         try:
             outcome = session.set_model(model, base_url)
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             CONSOLE.print(f"[bold red]error:[/] {exc}")
             return
         effective = (outcome.get("llm") or {}).get("model", "?")

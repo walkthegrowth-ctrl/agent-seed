@@ -97,16 +97,16 @@ def spawn_server(env: dict[str, str], project_root: str) -> subprocess.Popen:
 
 def wait_until_healthy(url: str, timeout: float = 20.0) -> None:
     """Poll ``GET /health`` until the backend answers 200 (or time out)."""
-    import httpx
+    import httpx2
 
     deadline = time.monotonic() + timeout
     last = "server did not start"
     while time.monotonic() < deadline:
         try:
-            with httpx.Client(timeout=2) as client:
+            with httpx2.Client(timeout=2) as client:
                 if client.get(f"{url}/health").status_code == 200:
                     return
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             last = str(exc)
         time.sleep(0.2)
     raise TimeoutError(f"backend at {url} not healthy within {timeout:.0f}s: {last}")

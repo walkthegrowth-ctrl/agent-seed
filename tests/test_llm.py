@@ -10,7 +10,7 @@ def test_parse_sse_line():
 
 
 def test_parse_sse_line_str():
-    # httpx iter_lines() yields str; this is the runtime code path.
+    # httpx2 iter_lines() yields str; this is the runtime code path.
     assert parse_sse_line("") is None
     assert parse_sse_line('{"a":1}') is None
     assert parse_sse_line("data: [DONE]") is None

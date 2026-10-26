@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 import pytest
 
 from tests.e2e.fake_llm import FakeLLMServer, fail, text, tool
@@ -269,5 +269,5 @@ def test_quit_exits_cleanly(repl: ReplDriver, backend: dict[str, Any]) -> None:
     out = repl.send("/quit")
     assert "bye" in out.lower(), out[:1200]
     # The backend is still healthy after the REPL has exited.
-    with httpx.Client(timeout=5) as client:
+    with httpx2.Client(timeout=5) as client:
         assert client.get(f"{backend['url']}/health").status_code == 200

@@ -31,10 +31,10 @@ client-only task (see `docs/protocol.md`).
 ## Dependencies
 
 Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/). Runtime libs:
-`fastapi`, `uvicorn`, `httpx`, `rich`, `prompt_toolkit`. Dev: `pytest`,
+`fastapi`, `uvicorn`, `httpx2`, `rich`, `prompt_toolkit`. Dev: `pytest`,
 `pytest-asyncio`.
 
-No LLM SDK — a thin `httpx` client speaks the OpenAI chat-completions API
+No LLM SDK — a thin `httpx2` client speaks the OpenAI chat-completions API
 directly, so any OpenAI-compatible endpoint works (Ollama, LM Studio, vLLM,
 OpenRouter, …).
 
@@ -116,7 +116,7 @@ agent_seed/
   core.py                 Agent: history + LLM/tool loop (framework-agnostic)
   hooks.py                Hooks + RunContext: the stable extension surface
   discovery.py            auto-loads promoted hooks from hook_modules/ (+ agent subdirs)
-  llm.py                  OpenAI-compatible streaming client (httpx)
+  llm.py                  OpenAI-compatible streaming client (httpx2)
   tools.py                @tool registry, JSON-schema gen, calculator
   backends/
     http/
