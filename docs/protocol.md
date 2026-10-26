@@ -121,7 +121,10 @@ Optional query parameter:
   whitelist allows** (resolved via `hook_modules/<agent_name>/`, falling back
   to `hook_modules/`). An agent that declares no tool set (no `enter_agent` /
   no `ctx.allowed_tools`) returns `{"tools": [], "names": []}`. Strict
-  policy: an omitted set is *zero tools*, not *all tools*.
+  policy: an omitted set is *zero tools*, not *all tools*. To read an agent's
+  whitelist the backend runs that agent's `enter_agent` against a scratch
+  `RunContext`; if that hook **raises**, `GET /tools?agent_name=<n>` returns
+  `500` — a broken agent hook, not a protocol error.
 
 Without `agent_name`, the whole tool catalog (the union of every registered
 tool) is returned. This is a *catalog* endpoint — it is not a live session

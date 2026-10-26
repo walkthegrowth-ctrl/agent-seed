@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv (pinned to the version that generated uv.lock)
+        uses: astral-sh/setup-uv@v5
+        with:
+          uv-version: 0.11.11
+      - name: Install deps (runtime + dev group)
+        run: uv sync
+      - name: Lint
+        run: uv run ruff check agent_seed experiments tests
+      - name: Format check
+        run: uv run ruff format --check agent_seed experiments tests
+      # No .env / Ollama on CI: test_e2e_real.py auto-skips (self-hosted-only exception);
+      # the rest of the suite is deterministic and network-free.
+      - name: Test
+        run: uv run pytest -q

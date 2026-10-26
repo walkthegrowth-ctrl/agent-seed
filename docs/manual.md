@@ -909,7 +909,9 @@ hooks = Hooks(before_llm=budget)
 
 ### Testing hooks
 
-Tests in this repo must stay network-free. Use `tests/conftest.py::FakeLLMClient`.
+Tests in this repo must not *depend* on an external LLM or service (a loopback fake,
+or a self-hosted endpoint, is fine — see the "network-free" gotcha in `AGENTS.md`).
+Use `tests/conftest.py::FakeLLMClient`.
 Pattern:
 
 ```python

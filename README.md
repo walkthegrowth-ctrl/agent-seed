@@ -43,7 +43,7 @@ OpenRouter, …).
 ```bash
 uv sync                      # create .venv, install runtime + dev deps (dev is the default group)
 cp .env.example .env         # then set your LLM vars in .env
-uv run pytest                # run the test suite (no network needed)
+uv run pytest                # run the test suite (deterministic; one auto-skip real-LLM smoke)
 ```
 
 ## Configuration
@@ -95,7 +95,7 @@ you> /tools
 you> tools: calculator
 
 you> /model
-you> {'llm': {'base_url': 'http://localhost:11434/v1', 'model': 'qwen3:8b', 'api_key_set': True}}
+you> {'llm': {'base_url': 'http://localhost:11434/v1', 'model': 'qwen3:8b', 'api_key_set': True, 'timeout': 120.0}}
 ```
 
 ## Using the backend directly
@@ -142,7 +142,10 @@ tests/
   test_backend.py         real FastAPI app end-to-end (mocked LLM)
   test_model_selection.py runtime model selection (set_model / on_model_change / test_model)
   test_repl.py            REPL: SSE parse, Session client, /model & /model force & /model test
-  test_repl_loop.py       REPL: command loop + slash commands
+   test_repl_loop.py       REPL: command loop + slash commands
+   test_e2e_repl.py        end-to-end: real backend+REPL vs a scripted in-loop LLM (pty, no network)
+   test_e2e_real.py        end-to-end smoke vs a real LLM (auto-skips if none reachable)
+   e2e/                    e2e support: scripted LLM server (ThreadingHTTPServer) + pty REPL driver
 ```
 
 ## Design notes
