@@ -198,11 +198,28 @@ Every event is a standard SSE frame `event: <type>` + `data: <json>`.
 |------|---------|---------|
 | `tool` | `{ "name", "arguments", "result" }` | the agent invoked a tool and got a result (string). |
 | `token` | `{ "text" }` | one streamed content token of the **final** answer, in order. |
-| `done` | `{ "session_id" }` | turn complete. Final event of a turn. |
+| `done` | `{ "session_id", "usage"?, "usage_session"? }` | turn complete. `usage` = this turn's tokens; `usage_session` = the session cumulative total. Final event of a turn. |
 | `error` | `{ "message" }` | unrecoverable failure; final event of a turn. |
 
 A well-formed turn is: zero or more `tool` events, then one or more `token`
 events (unless the final answer is empty), then exactly one `done` (or `error`).
+
+### `done` usage fields
+
+`done` always carries `session_id`. The two usage keys are **optional and
+omitted** when the LLM endpoint reported no `usage` for the turn:
+
+- `usage` — this turn's token counters, summed across every LLM call the turn
+  made (a tool round + the final answer). Shape is whatever the LLM sent (the
+  OpenAI convention is `prompt_tokens` / `completion_tokens` / `total_tokens`).
+- `usage_session` — the **session** cumulative total (the sum of every turn's
+  `usage` in this session). It is maintained by the backend and cleared by
+  `POST /reset`. A fresh session's first turn has `usage_session` equal to
+  `usage`.
+
+Both are backend-computed (the backend sums the LLM's per-call counters; it does
+not trust a client-supplied total). A frontend that ignores them (older
+frontends) is unaffected — this is append-only.
 
 ### Example full response
 
@@ -229,7 +246,7 @@ event: token
 data: {"text": "."}
 
 event: done
-data: {"session_id": "006477f9e62d4606ae4aa44cb3a20f7d"}
+data: {"session_id": "006477f9e62d4606ae4aa44cb3a20f7d", "usage": {"prompt_tokens": 21, "completion_tokens": 6, "total_tokens": 27}, "usage_session": {"prompt_tokens": 21, "completion_tokens": 6, "total_tokens": 27}}
 ```
 
 ### HTTP status codes

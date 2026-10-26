@@ -125,13 +125,30 @@ def _last_chat_request(fake: FakeLLMServer) -> dict[str, Any]:
 
 def test_help_lists_the_commands(repl: ReplDriver) -> None:
     out = repl.send("/help")
-    for command in ("/help", "/reset", "/agent", "/agents", "/tools", "/model", "/quit"):
+    for command in ("/help", "/reset", "/agent", "/agents", "/tools", "/model", "/usage", "/quit"):
         assert command in out, f"help output missing {command!r}:\n{out[:1200]}"
 
 
 def test_tools_lists_calculator(repl: ReplDriver) -> None:
     out = repl.send("/tools")
     assert "calculator" in out, out[:1200]
+
+
+def test_per_turn_usage_renders_and_usage_command_accumulates(
+    fake_server: FakeLLMServer, repl: ReplDriver
+) -> None:
+    # The fake LLM reports usage (prompt=1, completion=1) on each completion;
+    # the core turns that into a per-turn usage, the backend emits it on ``done``,
+    # and the REPL renders a ``in=/out=`` line and tracks the session total.
+    fake_server.reset(text("hello world"))
+    first = repl.send("say hello")
+    assert "in=1" in first and "out=1" in first, (
+        "the per-turn usage line must be rendered after the answer:\n" + first[:1200]
+    )
+    out = repl.send("/usage")
+    assert "session:" in out and "in=1" in out, (
+        "/usage must show the session cumulative total:\n" + out[:1200]
+    )
 
 
 def test_agents_lists_alpha(repl: ReplDriver) -> None:

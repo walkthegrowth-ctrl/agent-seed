@@ -295,8 +295,8 @@ This is the most important part of the model. A `RunContext` falls into
 
 | | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          | **working state** (set by the core / a tool call or turn) |
 |---|----------------------------------------|--------------------------------------------------|------------------------------------------------------------|
-| fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `base_model`, `current_model`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` | `tool_call`, `tool_result`, `final_answer` |
-| core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round | `tool_call`/`tool_result` are set for one tool call; `final_answer` is set once per turn in `_finish_turn` |
+ | fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `base_model`, `current_model`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` | `tool_call`, `tool_result`, `final_answer`, `turn_usage` |
+ | core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round | `tool_call`/`tool_result` are set for one tool call; `final_answer` and `turn_usage` are set once per turn in `_finish_turn` |
 | hook behavior | may read; may write once → the change **persists** ("sticky") until changed again | may read / rewrite *for this request only* | read the call's data; rewrite `tool_result` (via `after_tool_call`) or `final_answer` (via `prepare`/`finish`) — not persisted beyond the call / turn |
 
 Consequences a hook can rely on:
@@ -307,7 +307,10 @@ Consequences a hook can rely on:
   changed value each turn.
 - `ctx.messages`, `ctx.tools`, `ctx.tool_loop_round` are **rebuilt** before
   each `before_llm`. Do not rely on what you saw last request; recompute it.
-- `ctx.usage` accumulates across the run.
+ - `ctx.usage` accumulates across the run. `ctx.turn_usage` is the **per-turn**
+   slice of it (the tokens this turn added, summed across every LLM call the
+   turn made). The core sets it in `_finish_turn`; the backend surfaces both on
+   the `done` SSE event (see `docs/protocol.md`). A hook may read either.
 
 ### Lifecycle
 
@@ -395,6 +398,7 @@ class RunContext:
     tool_call: dict | None      # per-call: {"name","arguments"} or None (veto)
     tool_result: Any            # per-call: the tool's return value (or error string)
     final_answer: str | None    # per-turn: the final text (prepare/finish may rewrite)
+    turn_usage: dict            # per-turn: this turn's token counters (set in _finish_turn)
 ```
 
 #### `extras`: the walls

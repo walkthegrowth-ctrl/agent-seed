@@ -20,6 +20,8 @@ class _FakeSession:
         self.model_calls: list[str] = []
         self.test_model_calls: list[tuple[str, str | None]] = []
         self.set_model_calls: list[tuple[str, str | None]] = []
+        # usage accumulates as turns complete (populated by Repl._turn on done)
+        self.usage_session: dict[str, Any] = {}
         # configurable probe outcome
         self.probe_ok: bool = True
         self.probe_error: str | None = None
@@ -27,7 +29,14 @@ class _FakeSession:
     def chat_stream(self, message: str) -> Iterator[tuple[str, dict[str, Any]]]:
         self.sent.append(message)
         yield "token", {"text": "[response]"}
-        yield "done", {}
+        yield (
+            "done",
+            {
+                "session_id": "s",
+                "usage": {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10},
+                "usage_session": {"prompt_tokens": 8, "completion_tokens": 11, "total_tokens": 19},
+            },
+        )
 
     def model(self) -> dict[str, Any] | None:
         self.model_calls.append("current")
@@ -221,3 +230,38 @@ def test_model_usage_errors_remain_in_normal_mode() -> None:
     assert session2.set_model_calls == []
     assert session2.test_model_calls == []
     assert any("usage" in t.lower() for t in prints)
+
+
+# -- /usage command -----------------------------------------------------------
+
+
+def test_usage_shows_session_total_after_turns() -> None:
+    session = _mk_session()
+    session, prints = _run_with_inputs(["hi there", "/usage", "/quit"], session=session)
+    # the turn's done event populated the session mirror
+    assert session.usage_session["prompt_tokens"] == 8
+    # the per-turn line was rendered
+    assert any("in=4" in t and "out=6" in t for t in prints)
+    # /usage prints the session total
+    assert any("session:" in t and "in=8" in t for t in prints)
+
+
+def test_usage_with_no_turns_reports_empty() -> None:
+    session = _mk_session()
+    session, prints = _run_with_inputs(["/usage", "/quit"], session=session)
+    assert not session.usage_session
+    assert any("no usage recorded" in t for t in prints)
+
+
+def test_reset_clears_session_usage_mirror() -> None:
+    session = _mk_session()
+
+    # seed a real reset on the fake
+    def fake_reset() -> None:
+        session.usage_session = {}
+
+    session.reset = fake_reset  # type: ignore[method-assign]
+    session.usage_session = {"prompt_tokens": 8, "completion_tokens": 11}
+    session, prints = _run_with_inputs(["a", "/reset", "/usage", "/quit"], session=session)
+    assert session.usage_session == {}
+    assert any("no usage recorded" in t for t in prints)

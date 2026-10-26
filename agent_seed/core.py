@@ -42,6 +42,38 @@ def _elapsed_ms(start: float) -> float:
     return round((time.monotonic() - start) * 1000.0, 1)
 
 
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _sum_usage(total: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    """Add ``delta``'s numeric counters onto ``total`` (non-numeric keys: last-wins).
+
+    ``dict.update`` is wrong here: a multi-call turn (tool round + final answer)
+    would let the last completion's counts clobber the earlier ones. Summing the
+    shared counters keeps the run-cumulative ``usage`` correct across calls.
+    """
+    out = dict(total)
+    for key, value in delta.items():
+        prev = out.get(key)
+        if _is_number(value) and _is_number(prev):
+            out[key] = prev + value
+        else:
+            out[key] = value
+    return out
+
+
+def _usage_delta(current: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Per-turn usage = the numeric counters that advanced since ``snapshot``."""
+    out: dict[str, Any] = {}
+    for key in set(current) | set(snapshot):
+        if _is_number(current.get(key)) or _is_number(snapshot.get(key)):
+            out[key] = (current.get(key) or 0) - (snapshot.get(key) or 0)
+        elif key in current:
+            out[key] = current[key]
+    return out
+
+
 class Agent:
     """One run, one ``Agent``.
 
@@ -338,6 +370,9 @@ class Agent:
         ctx = self._context
         self._turn_count += 1
         ctx.turn = self._turn_count
+        # Snapshot the run-cumulative before this turn so we can report the
+        # per-turn delta (ctx.turn_usage) without changing usage's semantics.
+        usage_snapshot = dict(ctx.usage)
         self._establish()
 
         def call_hook(hook: Callable[[RunContext], None] | None) -> None:
@@ -379,10 +414,10 @@ class Agent:
                 config=ctx.current_model,
             )
             if completion.usage:
-                ctx.usage.update(completion.usage)
+                ctx.usage = _sum_usage(ctx.usage, completion.usage)
 
             if not completion.tool_calls:
-                return self._finish_turn(ctx, completion.content)
+                return self._finish_turn(ctx, completion.content, usage_snapshot)
 
             # Record the assistant message with its tool_calls, then results.
             self.history.append(
@@ -465,14 +500,20 @@ class Agent:
             config=ctx.current_model,
         )
         if completion.usage:
-            ctx.usage.update(completion.usage)
-        return self._finish_turn(ctx, completion.content)
+            ctx.usage = _sum_usage(ctx.usage, completion.usage)
+        return self._finish_turn(ctx, completion.content, usage_snapshot)
 
     # ------------------------------------------------------------------
 
-    def _finish_turn(self, ctx: RunContext, content: str) -> str:
-        """Apply prepare/finish hooks, record history, return the answer."""
+    def _finish_turn(self, ctx: RunContext, content: str, usage_snapshot: dict[str, Any]) -> str:
+        """Apply prepare/finish hooks, record history, return the answer.
+
+        ``usage_snapshot`` is the run-cumulative ``usage`` captured at the
+        start of the turn; the delta (``ctx.usage - snapshot``) is stashed as
+        ``ctx.turn_usage`` for the backend to surface on the ``done`` event.
+        """
         ctx.final_answer = content
+        ctx.turn_usage = _usage_delta(ctx.usage, usage_snapshot)
         hooks = self.hooks
         if hooks.prepare is not None:
             hooks.prepare(ctx)

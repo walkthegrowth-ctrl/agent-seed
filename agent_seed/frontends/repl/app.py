@@ -94,6 +94,7 @@ class Session:
         self.timeout = timeout
         self.session_id = uuid.uuid4().hex
         self.agent_name: str | None = None
+        self.usage_session: dict[str, Any] = {}
         self.client = httpx2.Client(timeout=timeout)
 
     # -- backend calls ------------------------------------------------------
@@ -101,6 +102,7 @@ class Session:
     def reset(self) -> None:
         self.client.post(f"{self.url}/reset", json={"session_id": self.session_id})
         self.session_id = uuid.uuid4().hex
+        self.usage_session = {}
 
     def tools(self) -> list[dict[str, Any]]:
         """Public API: full OpenAI function schemas for the active agent.
@@ -200,6 +202,25 @@ def render_tool_event(console: Console, name: str, arguments: Any, result: Any) 
     console.print(f"[bold cyan]⚙ {name}[/] [dim]({args})[/] [green]→[/] [magenta]{result}[/]")
 
 
+def _is_num(v: Any) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def format_tokens(usage: dict[str, Any] | None) -> str:
+    """A compact ``in=N out=M (total=T)`` string for a usage dict, or a dash."""
+    if not usage:
+        return "—"
+    parts: list[str] = []
+    for key, label in (("prompt_tokens", "in"), ("completion_tokens", "out")):
+        if _is_num(usage.get(key)):
+            parts.append(f"{label}={int(usage[key])}")
+    if _is_num(usage.get("total_tokens")):
+        parts.append(f"total={int(usage['total_tokens'])}")
+    elif all(_is_num(usage.get(k)) for k in ("prompt_tokens", "completion_tokens")):
+        parts.append(f"total={int(usage['prompt_tokens']) + int(usage['completion_tokens'])}")
+    return " ".join(parts) if parts else f"{usage}"
+
+
 # -- REPL main loop ----------------------------------------------------------
 
 HELP = """[bold]commands[/]
@@ -208,6 +229,7 @@ HELP = """[bold]commands[/]
   /agent [n]   set the agent (a hooks subdirectory); no arg shows current
   /agents      list discoverable agent names from the backend
   /tools       list tools registered on the backend
+  /usage       show the session's cumulative token usage
   /model       show the session's LLM config
   /model <n>   switch the model (probe first; abort if the model is not reachable)
   /model force <n>  switch without a probe (use when probe can't reach it)
@@ -339,7 +361,13 @@ class Repl:
                     )
                 elif event == "error":
                     CONSOLE.print(f"[bold red]error:[/] {payload.get('message')}")
-                # "done" is terminal; loop ends
+                elif event == "done":
+                    if payload.get("usage_session") is not None:
+                        session.usage_session = dict(payload["usage_session"])
+                    turn_usage = payload.get("usage")
+                    if turn_usage:
+                        CONSOLE.print(f"[dim]{format_tokens(turn_usage)}[/]")
+                    # "done" is terminal; loop ends
             if not first:
                 sys.stdout.write("\n")
                 sys.stdout.flush()
@@ -371,6 +399,14 @@ class Repl:
                 CONSOLE.print("[dim]no discoverable agents on the backend[/]")
             else:
                 CONSOLE.print("[bold]agents:[/] " + ", ".join(names))
+            return True
+        if cmd == "/usage":
+            total = session.usage_session
+            if not total:
+                CONSOLE.print("[dim]no usage recorded yet (no turns, or backend sent none)[/]")
+            else:
+                CONSOLE.print(f"[bold]session:[/] {format_tokens(total)}")
+            CONSOLE.print("[dim]session total resets with the history ([/reset])[/]")
             return True
         if cmd == "/tools":
             names = session.tools_names()

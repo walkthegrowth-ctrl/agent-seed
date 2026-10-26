@@ -25,11 +25,11 @@ Two things are defined here:
     changed again), ``allowed_tools`` (sticky — a hook change holds until
     changed again), ``base_model`` (immutable) and ``current_model`` (sticky
     — the model the core actually calls; hooks own its value, and the core
-    never resets it on an agent switch), cumulative ``usage``, and ``extras``.
-  - *per-request* fields are rebuilt by the core on each LLM call:
-    ``messages``, ``tools``, ``tool_loop_round``.
-  - *per-call* fields are set for each tool call or turn:
-    ``tool_call``, ``tool_result``, ``final_answer``.
+     never resets it on an agent switch), cumulative ``usage``, and ``extras``.
+   - *per-request* fields are rebuilt by the core on each LLM call:
+     ``messages``, ``tools``, ``tool_loop_round``.
+   - *per-call* fields are set for each tool call or turn:
+     ``tool_call``, ``tool_result``, ``final_answer``, ``turn_usage``.
 
 What a hook is **not**:
 
@@ -135,6 +135,7 @@ class RunContext:
     tool_result: Any = None  # core's return value; hooks may rewrite
     final_answer: str | None = None  # prepare/finish may rewrite
     usage: dict[str, Any] = field(default_factory=dict)  # cumulative across the run
+    turn_usage: dict[str, Any] = field(default_factory=dict)  # this turn's tokens (per-turn)
 
     # -- hook-owned, flat keys (run-scoped) -----------------------------------
     extras: dict[str, Any] = field(default_factory=dict)

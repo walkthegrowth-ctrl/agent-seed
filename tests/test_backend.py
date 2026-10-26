@@ -190,6 +190,107 @@ def test_chat_streams_tool_then_token_then_done(tool_client):
     assert header_sid == done_data["session_id"]
 
 
+def _usage_hooks():
+    from agent_seed.hooks import Hooks, RunContext
+
+    def _enter(ctx: RunContext) -> None:
+        ctx.allowed_tools = ["calculator"]
+
+    return Hooks(enter_agent=_enter)
+
+
+class _UsageFake:
+    """A fake LLM that pops scripted completions (each may carry usage)."""
+
+    def __init__(self, config, script):
+        self.config = config
+        self._script = script
+
+    def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+        self.last_chat_config = config
+        completion = self._script.pop(0)
+        if on_token is not None and completion.content:
+            on_token(completion.content)
+        return completion
+
+
+def _usage_app(script):
+    """Build the app from a usage-bearing script. Returns (app, monkeypatch)."""
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+    app = server.create_app(registry, hooks=_usage_hooks())
+    mp = pytest.MonkeyPatch()
+    mp.setenv("LLM_MODEL", "test-model")
+
+    def fake_client_factory(cfg):
+        return _UsageFake(cfg, script)
+
+    mp.setattr(server, "OpenAICompatClient", fake_client_factory)
+    return app, mp
+
+
+def test_done_event_carries_per_turn_usage(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from tests.conftest import text_completion, tool_completion
+
+    # One turn (tool round + final answer); each scripted LLM call reports
+    # its own usage. Per-turn usage = sum of both calls in this turn.
+    script = [
+        tool_completion(
+            "calculator",
+            {"expression": "6 * 7"},
+            usage={"prompt_tokens": 2, "completion_tokens": 1},
+        ),
+        text_completion("42.0", usage={"prompt_tokens": 3, "completion_tokens": 2}),
+    ]
+    app, mp = _usage_app(script)
+    with TestClient(app) as client:
+        with client.stream("POST", "/chat", json={"message": "6 * 7?"}) as response:
+            body = "".join(response.iter_text())
+        events = dict(_events(body))
+        done = events["done"]
+        # per-turn = sum of both LLM calls in this turn (2+3, 1+2)
+        assert done["usage"]["prompt_tokens"] == 5
+        assert done["usage"]["completion_tokens"] == 3
+        # session total for a fresh session equals the first (only) turn
+        assert done["usage_session"]["prompt_tokens"] == 5
+        assert done["usage_session"]["completion_tokens"] == 3
+    mp.undo()
+
+
+def test_session_usage_accumulates_and_reset_clears(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from tests.conftest import text_completion
+
+    # One text completion per turn (no tool round). 3 script items for 3 turns.
+    script = [
+        text_completion("one", usage={"prompt_tokens": 1, "completion_tokens": 1}),
+        text_completion("two", usage={"prompt_tokens": 2, "completion_tokens": 3}),
+        text_completion("three", usage={"prompt_tokens": 4, "completion_tokens": 5}),
+    ]
+    app, mp = _usage_app(script)
+    with TestClient(app) as client:
+        sid = client.post("/chat", json={"message": "one"}).headers.get("x-session-id")
+        with client.stream("POST", "/chat", json={"message": "two", "session_id": sid}) as r:
+            events = dict(_events("".join(r.iter_text())))
+        done = events["done"]
+        # second turn: 2/3 for that turn; 3/4 for the session (1+2, 1+3)
+        assert done["usage"] == {"prompt_tokens": 2, "completion_tokens": 3}
+        assert done["usage_session"] == {"prompt_tokens": 3, "completion_tokens": 4}
+
+        # reset -> new session starts at zero; one turn => exactly one turn's usage
+        client.post("/reset", json={"session_id": sid})
+        with client.stream("POST", "/chat", json={"message": "three"}) as r:
+            events = dict(_events("".join(r.iter_text())))
+        done = events["done"]
+        assert done["usage"] == {"prompt_tokens": 4, "completion_tokens": 5}
+        assert done["usage_session"] == {"prompt_tokens": 4, "completion_tokens": 5}
+    mp.undo()
+
+
 def test_chat_missing_model_returns_500(monkeypatch, tmp_path):
     monkeypatch.delenv("LLM_MODEL", raising=False)
     # ensure no .env in cwd can re-provide LLM_MODEL at request time

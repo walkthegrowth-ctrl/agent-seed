@@ -60,16 +60,20 @@ class FakeLLMClient:
 
 
 def tool_completion(
-    name: str, arguments: dict[str, Any], content: str | None = None
+    name: str,
+    arguments: dict[str, Any],
+    content: str | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> Completion:
     return Completion(
         content=content,
         tool_calls=[ToolCall(id="call_1", name=name, arguments=arguments)],
+        usage=usage,
     )
 
 
-def text_completion(text: str) -> Completion:
-    return Completion(content=text)
+def text_completion(text: str, usage: dict[str, Any] | None = None) -> Completion:
+    return Completion(content=text, usage=usage)
 
 
 def parse_arguments(request: dict[str, Any], tool_call_index: int = 0) -> dict[str, Any]:

@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ... import __version__
-from ...core import Agent
+from ...core import Agent, _is_number
 from ...discovery import get_hooks_for_agent, list_agents
 from ...hooks import Hooks, RunContext
 from ...llm import LLMConfig, LLMConfigError, OpenAICompatClient
@@ -79,6 +79,10 @@ class SessionStore:
         self._agents: dict[str, Agent] = {}
         self._registry = registry
         self._hooks = hooks
+        # Per-session cumulative token usage (sum of each turn's per-turn usage).
+        # Backend-managed: the core's ctx.usage is run-cumulative and survives
+        # /reset, so the session-level total is tracked here and cleared by reset().
+        self._session_usage: dict[str, dict[str, Any]] = {}
         # App-default LLM for NEW sessions (None -> env at session creation).
         # A POST /config without session_id updates this AND all live sessions.
         self._default_llm: LLMConfig | None = None
@@ -138,10 +142,31 @@ class SessionStore:
             agent.set_agent_name(agent_name)
         return session_id, agent
 
+    def accumulate_usage(
+        self, session_id: str, turn_usage: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Merge one turn's per-turn usage into the session cumulative total.
+
+        Returns the session total (summed numeric counters). Empty/None input is
+        a no-op so a turn whose LLM sent no ``usage`` leaves the total untouched.
+        """
+        if not turn_usage:
+            return dict(self._session_usage.get(session_id, {}))
+        total = dict(self._session_usage.get(session_id, {}))
+        for key, value in turn_usage.items():
+            prev = total.get(key)
+            if _is_number(value) and _is_number(prev):
+                total[key] = prev + value
+            else:
+                total[key] = value
+        self._session_usage[session_id] = total
+        return total
+
     def reset(self, session_id: str) -> None:
         agent = self._agents.get(session_id)
         if agent is not None:
             agent.reset()
+        self._session_usage.pop(session_id, None)
 
 
 def sse_event(event: str, data: dict[str, Any]) -> str:
@@ -331,30 +356,40 @@ def create_app(
                 loop.call_soon_threadsafe(queue.put_nowait, (kind, payload))
 
             def producer() -> None:
+                succeeded = False
                 try:
                     agent.chat(
                         request.message,
                         on_token=lambda t: put("token", {"text": t}),
                         on_event=lambda kind, payload: put(kind, payload),
                     )
+                    succeeded = True
                 except Exception as exc:  # noqa: BLE001 - stream boundary
                     put("error", {"message": str(exc)})
                 finally:
-                    put("__done__", None)
+                    payload: dict[str, Any] = {}
+                    if succeeded:
+                        turn = dict(agent.context.turn_usage or {})
+                        total = sessions.accumulate_usage(session_id, turn)
+                        payload = {"usage": turn or None, "usage_session": total or None}
+                    put("__done__", payload)
 
             loop.run_in_executor(None, producer)
             finished_ok = False
+            done_payload: dict[str, Any] = {}
             while True:
                 kind, payload = await queue.get()
                 if kind == "__done__":
                     finished_ok = True
+                    done_payload = payload or {}
                     break
                 if kind == "error":
                     yield sse_event("error", payload)
                     break
                 yield sse_event(kind, payload)
             if finished_ok:
-                yield sse_event("done", {"session_id": session_id})
+                done_payload["session_id"] = session_id
+                yield sse_event("done", done_payload)
 
         return StreamingResponse(
             stream(),

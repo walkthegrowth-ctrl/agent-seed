@@ -128,6 +128,33 @@ def test_agent_uses_tool_then_answers():
     )
 
 
+def test_usage_accumulates_across_calls_in_one_turn():
+    """A turn with two LLM calls must SUM the per-call usage, not clobber it.
+
+    Regression: ``ctx.usage.update(...)`` would let the second call's
+    completion_tokens (2) replace the first call's (5) instead of summing.
+    """
+    registry = ToolRegistry()
+    registry.register(calculator)
+
+    client = FakeLLMClient(
+        [
+            tool_completion(
+                "calculator",
+                {"expression": "12 * 13"},
+                usage={"prompt_tokens": 10, "completion_tokens": 5},
+            ),
+            text_completion("156.", usage={"prompt_tokens": 20, "completion_tokens": 3}),
+        ]
+    )
+    agent = Agent(client, registry, hooks=Hooks(enter_agent=_allow_all_tools(registry)))
+    agent.chat("what is 12 times 13?")
+    # per-turn usage = the sum of both calls in this turn (30, 8)
+    assert agent.context.turn_usage == {"prompt_tokens": 30, "completion_tokens": 8}
+    # run-cumulative for a fresh run equals the first (only) turn
+    assert agent.context.usage == {"prompt_tokens": 30, "completion_tokens": 8}
+
+
 def test_agent_tool_error_is_reported_not_raised():
     registry = ToolRegistry()
     registry.register(calculator)
