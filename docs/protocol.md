@@ -319,5 +319,16 @@ data: {"session_id": "006477f9e62d4606ae4aa44cb3a20f7d", "usage": {"prompt_token
 3. Render `tool` events for observability (name, args, result).
 4. Treat `done` as the end of the turn; retain `session_id` for the next turn.
 5. On `error` or HTTP non-200, surface the message and stop the turn.
+6. Read the stream to the `done` (or `error`) frame before assuming the turn
+   is complete, and before issuing a request whose correctness depends on
+   server state a turn sets. The turn runs on a backend worker; `done` is
+   emitted only once that work has finished — **closing the stream before
+   `done` does not mean the turn has finished**. A client that stops reading
+   early may race against a producer thread that has not yet completed its
+   LLM call and side effects (and any such state it later exposes, e.g. via
+   `GET /config` or `GET /prompt?live=true`, is not guaranteed to reflect that
+   turn). To abandon a turn you may close the connection, but you must not
+   then rely on the turn having finished or its state being settled.
 
-The reference implementation is `agent_seed/frontends/repl/app.py::Session`.
+The reference implementation is `agent_seed/frontends/repl/app.py::Session`
+(which always reads each turn's stream fully to `done` / `error`).

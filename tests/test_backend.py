@@ -664,12 +664,20 @@ def test_config_set_changes_the_model_the_session_calls(monkeypatch):
     with TestClient(app) as test_client:
         with test_client.stream("POST", "/chat", json={"message": "a"}) as response:
             sid = response.headers["x-session-id"]
+            # Drain the turn to completion so no producer thread is still
+            # writing fake state when we assert on it below.
+            "".join(response.iter_text())
 
         response = test_client.post("/config", json={"session_id": sid, "model": "model-b"})
         assert response.status_code == 200
 
         with test_client.stream("POST", "/chat", json={"session_id": sid, "message": "b"}) as _r:
-            fake = app.state.fakes[0]
+            # Read the stream to the `done` frame: the backend emits `done`
+            # only after the producer thread finished the LLM call, so the fake
+            # state observed below is guaranteed to reflect THIS turn.
+            body = "".join(_r.iter_text())
+        assert "done" in [k for k, _ in _events(body)]
+        fake = app.state.fakes[0]
         assert fake.last_chat_config is not None
         assert fake.last_chat_config.model == "model-b"
     mp.undo()
@@ -691,12 +699,17 @@ def test_config_set_global_applies_to_live_and_new_sessions(monkeypatch):
         assert response.json()["llm"]["model"] == "global-model"
 
         with test_client.stream("POST", "/chat", json={"session_id": sid, "message": "b"}) as _r:
-            pass
+            # Read the stream to the `done` frame: the backend emits `done`
+            # only after the producer thread finished the LLM call, so
+            # live_fake.last_chat_config below is guaranteed to be THIS turn's.
+            body = "".join(_r.iter_text())
+        assert "done" in [k for k, _ in _events(body)]
         assert live_fake.last_chat_config.model == "global-model"
 
         # a NEW session now starts from the global app default
         with test_client.stream("POST", "/chat", json={"message": "c"}) as _r2:
-            pass
+            body2 = "".join(_r2.iter_text())
+        assert "done" in [k for k, _ in _events(body2)]
         assert app.state.fakes[-1].config.model == "global-model"
     mp.undo()
 
