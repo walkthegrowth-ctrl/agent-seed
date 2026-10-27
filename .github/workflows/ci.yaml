@@ -9,18 +9,24 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install uv (pinned to the version that generated uv.lock)
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
-          uv-version: 0.11.11
+          version: 0.11.11
+      # --frozen: install exactly what uv.lock specifies; fail if the lock
+      # does not match pyproject.toml, rather than re-resolving to new deps.
       - name: Install deps (runtime + dev group)
-        run: uv sync
+        run: uv sync --frozen
       - name: Lint
         run: uv run ruff check agent_seed experiments tests
       - name: Format check
         run: uv run ruff format --check agent_seed experiments tests
-      # No .env / Ollama on CI: test_e2e_real.py auto-skips (self-hosted-only exception);
-      # the rest of the suite is deterministic and network-free.
+      # Fail the build if any locked package has a known vulnerability in the
+      # resolved version (checked against the OSV database).
+      - name: Audit locked deps against OSV
+        run: uv run python scripts/audit_osv.py
+      # No .env / Ollama on CI: test_e2e_real.py auto-skips (self-hosted-only
+      # exception); the rest of the suite is deterministic and network-free.
       - name: Test
         run: uv run pytest -q
