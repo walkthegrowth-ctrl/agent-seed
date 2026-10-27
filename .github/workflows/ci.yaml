@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install uv (pinned to the version that generated uv.lock)
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.3.2
         with:
           version: 0.11.11
       # --frozen: install exactly what uv.lock specifies; fail if the lock
