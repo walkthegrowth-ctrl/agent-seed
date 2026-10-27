@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -157,21 +158,16 @@ def test_unknown_slash_command_prints_error_and_stays_in_normal() -> None:
     assert any("unknown command" in t for t in prints)
 
 
-def test_joined_block_is_written_to_file_history_once() -> None:
-    import os
-
-    tmp = "/tmp/opencode/repl_hist_test.txt"
-    if os.path.exists(tmp):
-        os.remove(tmp)
-    hist = FileHistory(tmp)
-    try:
-        session, _ = _run_with_inputs(["/", "a", "b", "c", "/", "single", "/quit"], history=hist)
-        assert session.sent == ["a\nb\nc", "single"]
-        stored = list(hist.load_history_strings())
-        assert stored == ["a\nb\nc"]
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+def test_joined_block_is_written_to_file_history_once(tmp_path: Path) -> None:
+    # tmp_path is a guaranteed-existing, unique dir (pytest provides it), so
+    # FileHistory's open("ab") has a real home on any runner — a hardcoded
+    # /tmp/... path would fail on a clean CI box that lacks that directory.
+    hist = FileHistory(str(tmp_path / "repl_hist_test.txt"))
+    session, _ = _run_with_inputs(["/", "a", "b", "c", "/", "single", "/quit"], history=hist)
+    assert session.sent == ["a\nb\nc", "single"]
+    # only the joined block is written to the file history, once
+    stored = list(hist.load_history_strings())
+    assert stored == ["a\nb\nc"]
 
 
 # -- /model command routes ----------------------------------------------------
