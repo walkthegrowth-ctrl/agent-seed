@@ -52,9 +52,9 @@ is half-merged. When an ``agent_name`` is in play, a broken
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import sys
-from collections.abc import Callable
 from dataclasses import fields
 from pathlib import Path
 from typing import Any
@@ -126,21 +126,89 @@ def list_agents() -> list[str]:
 
 
 def discover(folder: Path) -> Hooks:
-    """Load and merge every hook module in ``folder`` (uncached)."""
+    """Load and merge every hook module and prompt file in ``folder`` (uncached).
+
+    A folder is a set of hook modules (``*.py`` files exposing ``make()``) and
+    optionally up to three prompt-content files with fixed names:
+
+    * ``prompt.md``      -> ``Hooks.prompt``     (the agent's identity)
+    * ``context.md``     -> ``Hooks.context``    (per-round context baseline)
+    * ``examples.jsonl`` -> ``Hooks.examples``   (few-shot message list)
+
+    Merge order for a data slot (lowest -> highest precedence):
+    1. every ``*.py`` module's ``make()`` result (alphabetical, last non-None wins);
+    2. the folder's own fixed-name file (wins over any module value).
+
+    This is an extension of the existing "alphabetical last-wins" rule: a module
+    that declares ``prompt`` is superseded by a ``prompt.md`` in the same folder
+    (explicit file content beats code-declared content).
+    """
     if not folder.is_dir():
         return Hooks()
-    hooks_by_path: list[tuple[Path, Hooks]] = [
-        (path, _load_module(path)) for path in sorted(folder.glob("*.py"))
-    ]
+
+    # Load every hook module once (fail-fast on any import / make() error),
+    # keeping them in alphabetical order for the "last file wins" merges.
+    modules: list[Hooks] = [_load_module(path) for path in sorted(folder.glob("*.py"))]
+
     merged = Hooks()
     for slot in (f.name for f in fields(Hooks)):
-        winner: Callable[[Any], None] | None = None
-        for _, hooks in hooks_by_path:  # alphabetical: later file wins
+        winner: Any = None
+        for hooks in modules:  # alphabetical: later file wins
             value = getattr(hooks, slot)
             if value is not None:
                 winner = value
         setattr(merged, slot, winner)
+
+    # Fixed-name prompt files override module-declared values (explicit file
+    # content beats code-declared content).
+    def _read_text(name: str) -> str | None:
+        path = folder / name
+        if path.is_file():
+            text = path.read_text(encoding="utf-8").strip()
+            return text or None
+        return None
+
+    prompt = _read_text("prompt.md")
+    if prompt is not None:
+        merged.prompt = prompt
+
+    context = _read_text("context.md")
+    if context is not None:
+        merged.context = context
+
+    examples_path = folder / "examples.jsonl"
+    if examples_path.is_file():
+        merged.examples = _load_examples(examples_path)
+
     return merged
+
+
+def _load_examples(path: Path) -> list[dict[str, Any]]:
+    """Parse an ``examples.jsonl`` file (one JSON object per non-blank line).
+
+    Each line must be a JSON object; the result is a list of objects (deep-copied).
+    An empty file yields ``[]``. A line that is not a valid JSON object raises
+    ``DiscoveryError`` (fail-fast, same policy as a broken hook module).
+    """
+    out: list[dict[str, Any]] = []
+    raw_lines = path.read_text(encoding="utf-8").splitlines()
+    for lineno, line in enumerate(raw_lines, start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise DiscoveryError(
+                f"examples file {path.name!r} line {lineno}: invalid JSON: {exc}"
+            ) from exc
+        if not isinstance(value, dict):
+            raise DiscoveryError(
+                f"examples file {path.name!r} line {lineno}: expected a JSON object, "
+                f"got {type(value).__name__}"
+            )
+        out.append(value)
+    return out
 
 
 def _load_module(path: Path) -> Hooks:

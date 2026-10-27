@@ -26,9 +26,12 @@ Two things are defined here:
     changed again), ``base_model`` (immutable) and ``current_model`` (sticky
     — the model the core actually calls; hooks own its value, and the core
      never resets it on an agent switch), cumulative ``usage``, and ``extras``.
-   - *per-request* fields are rebuilt by the core on each LLM call:
-     ``messages``, ``tools``, ``tool_loop_round``.
-   - *per-call* fields are set for each tool call or turn:
+  - *per-request* fields are rebuilt by the core on each LLM call:
+    ``messages``, ``tools``, ``tool_loop_round``, and the per-round prompting
+    inputs ``context`` / ``examples`` / ``addendum`` (seeded from the active
+    agent's baseline each round, then ``before_llm`` may adjust them — see
+    :mod:`agent_seed.prompting`).
+    - *per-call* fields are set for each tool call or turn:
      ``tool_call``, ``tool_result``, ``final_answer``, ``turn_usage``.
 
 What a hook is **not**:
@@ -131,6 +134,15 @@ class RunContext:
     # -- per-request / per-call working state (rebuilt by the core) ----------
     messages: list[dict[str, Any]] = field(default_factory=list)
     tools: list[dict[str, Any]] = field(default_factory=list)
+    # Per-round prompting inputs (non-sticky): the core seeds these from the
+    # active agent's baseline (its Hooks.prompt/context/examples) at the start
+    # of each round, then before_llm may adjust them. compose_prompt reads them
+    # to build the messages sent to the LLM — they are NOT persisted and do not
+    # accumulate across rounds. See agent_seed/prompting.py and
+    # docs/manual.md "Prompting".
+    context: str | None = None  # per-round context block (e.g. RAG, date, state)
+    examples: list[dict[str, Any]] | None = None  # per-round few-shot [{"role","content"}]
+    addendum: str | None = None  # per-turn note rendered last into the system message
     tool_call: dict[str, Any] | None = None  # set: {"name","arguments"} or None (veto)
     tool_result: Any = None  # core's return value; hooks may rewrite
     final_answer: str | None = None  # prepare/finish may rewrite
@@ -147,6 +159,17 @@ class Hooks:
 
     All slots share the signature ``(ctx: RunContext) -> None``. All slots
     default to ``None`` — a hook that is not set simply does not run.
+
+    In addition to the callable slots, an agent may carry three optional
+    *data* fields loaded from its hook folder by
+    :func:`agent_seed.discovery.get_hooks`: ``prompt`` (identity, from
+    ``prompt.md``), ``context`` (per-round context baseline, from
+    ``context.md``), and ``examples`` (few-shot message list, from
+    ``examples.jsonl``). They are declared in the active agent's hooks, used
+    as the per-round seed for the matching :class:`RunContext` fields, and
+    rendered by :func:`agent_seed.prompting.compose_prompt` — hooks still have
+    full control (they override every one of these; see
+    ``docs/manual.md``, "Prompting").
 
     ``enter_agent`` / ``exit_agent`` are the agent-identity boundary hooks:
     they fire from ``Agent.__init__`` / ``Agent.set_agent_name`` (not in
@@ -187,3 +210,14 @@ class Hooks:
     # Turn termination:
     prepare: Hook | None = None  # ctx.final_answer is set; validate/normalize
     finish: Hook | None = None  # LAST word; may rewrite ctx.final_answer
+
+    # -- declared prompting content (data, not callables; optional) ----------
+    # Loaded by discovery from the agent's hook folder (prompt.md / context.md
+    # / examples.jsonl) or set explicitly. These are the *baselines* the core
+    # seeds into the per-round RunContext fields (context/examples; prompt ->
+    # base_prompt) before before_llm runs. They are data slots — no firing
+    # order — and discovery merges them the same "last file wins" way as the
+    # callable slots. Hooks can still override everything downstream of these.
+    prompt: str | None = None  # agent identity (prompt.md); seeds base_prompt
+    context: str | None = None  # per-round context baseline (context.md)
+    examples: list[dict[str, Any]] | None = None  # few-shot baseline (examples.jsonl)

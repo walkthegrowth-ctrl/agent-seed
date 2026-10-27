@@ -21,6 +21,8 @@ and the whole system can be explained on one page.
 ├──────────────────────────────────────────────────────────────┤
 │  llm.py             OpenAI-compatible streaming client        │
 │  tools.py           registry + schema gen + calculator tool   │
+│  prompting.py       compose identity/context/examples/addendum│
+│                     into the round's messages (default render)│
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,12 +54,13 @@ hooks) lives in `manual.md` — treat it as the source of truth:
 
 | path | responsibility |
 |------|----------------|
-| `agent_seed/core.py` | `Agent`: history, tool loop, round-trip cap. Talks to LLM + registry. No I/O besides the two interfaces it is given. Owns model selection: `set_model` (gated by `on_model_change`), `test_model`, `model_config`; passes `ctx.current_model` into every LLM call. |
-| `agent_seed/hooks.py` | `Hooks` + `RunContext`: the stable, extensible point of the core. See `manual.md`. |
-| `agent_seed/discovery.py` | Auto-loads promoted hook modules from `hook_modules/` (once per process, cached; fail-fast). Resolves an `agent_name` to a subdirectory (`hook_modules/<name>/`) with the root as the default. |
+| `agent_seed/core.py` | `Agent`: history, tool loop, round-trip cap, prompt composition (seeds the per-round `context`/`examples`/`addendum`, calls `compose_prompt` to build each round's messages, and applies the canonical system block after `before_llm`). Talks to LLM + registry. No I/O besides the two interfaces it is given. Owns model selection: `set_model` (gated by `on_model_change`), `test_model`, `model_config`; passes `ctx.current_model` into every LLM call. |
+| `agent_seed/hooks.py` | `Hooks` + `RunContext`: the stable, extensible point of the core (including the per-round `context`/`examples`/`addendum` fields and the declared `prompt`/`context`/`examples` data). See `manual.md`. |
+| `agent_seed/discovery.py` | Auto-loads promoted hook modules **and the agent's prompt files** (`prompt.md` / `context.md` / `examples.jsonl`) from `hook_modules/` (once per process, cached; fail-fast). Resolves an `agent_name` to a subdirectory (`hook_modules/<name>/`) with the root as the default. |
 | `agent_seed/llm.py` | `OpenAICompatClient`: streaming `POST /chat/completions`, SSE line parsing, chunk folding. `chat(..., config=None, max_tokens=None)` resolves a per-call config. `LLMConfig` (frozen) + `from_env` + `with_updates`; `LLMProbe`. |
 | `agent_seed/tools.py` | `ToolRegistry`, `@tool`, JSON-schema generation from annotations, and the starter `calculator`. |
-| `agent_seed/backends/http/server.py` | FastAPI app, session store, `POST /chat` SSE, `GET /tools`, `GET /agents`, `GET /config` (+ `POST /config`, `POST /config/test` for runtime model selection), `GET /health`, `POST /reset`. |
+| `agent_seed/prompting.py` | `compose_prompt` / `compose_system` / `normalize_examples`: the default rendering of a round's prompt (identity + context + addendum as one system message, then few-shot examples, then history). A convenience surface — hooks keep full control. |
+| `agent_seed/backends/http/server.py` | FastAPI app, session store, `POST /chat` SSE, `GET /tools`, `GET /agents`, `GET /prompt`, `GET /config` (+ `POST /config`, `POST /config/test` for runtime model selection), `GET /health`, `POST /reset`. |
 | `agent_seed/backends/http/cli.py` | `agent-seed` entry point (uvicorn). |
 | `agent_seed/frontends/repl/app.py` | `Session` (HTTP client), SSE parse + render, slash-commands. |
 | `agent_seed/frontends/repl/cli.py` | `agent-repl` entry point. |
@@ -80,18 +83,28 @@ no auth, single-user by design — see below.
   recover. Stream-level failures become an SSE `event: error`.
 - **Tool round-trip cap** (`MAX_TOOL_ROUNDS = 8`) prevents runaway loops; the
   core then forces a final answer with tools disabled.
+- **Prompt composition is a default render, not a lock.** Each round's messages
+  are built by `agent_seed/prompting.py` from the run's identity (sticky
+  `ctx.system_prompt`) plus the non-sticky per-round `context` / `examples` /
+  `addendum` (seeded from the agent's declared `prompt.md` / `context.md` /
+  `examples.jsonl`, then hooks may adjust). It is a convenience surface: hooks
+  keep full control and win on every channel. See `manual.md`, "Prompting".
 - **Deliberately out of scope:** persistence, auth, multi-user concurrency,
   rate limiting, config files, token accounting display, non-OpenAI tool
-  dialects. Each is a planned extension point, not a bug.
+  dialects. Each is a planned extension point, not a bug. See also
+  `docs/ideas.md` for smaller deferred items (e.g. the `examples.jsonl`
+  `{"query","answer"}` sugar).
 
 ## Extending
 
 Extension is a client-only or hook-only concern — the core is not modified.
-`docs/manual.md` is the source of truth for tools, hooks, and agents; the
-bullets below just point at the relevant section.
+`docs/manual.md` is the source of truth for tools, prompts, hooks, and agents;
+the bullets below just point at the relevant section.
 
 - New tool → `manual.md` "Adding tools".
-- New agent behavior (context, policy, budget, ...) → a hook; `manual.md`
+- New agent prompts (identity, context, few-shot) → drop files in the agent's
+  hook folder and/or a `before_llm` hook; `manual.md` "Prompting — the content layer".
+- New agent behavior (policy, budget, ...) → a hook; `manual.md`
   "Hooks — the extension surface".
 - A different *agent* (a distinct hook set) → `hook_modules/<agent_name>/`;
   `manual.md` "Agents: hook subdirectories".

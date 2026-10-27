@@ -22,6 +22,14 @@ Companion documents:
   - [Registration](#registration)
   - [Conventions &amp; gotchas](#conventions--gotchas)
   - [Testing tools](#testing-tools)
+- [Prompting — the content layer](#prompting--the-content-layer)
+  - [The four channels](#the-four-channels)
+  - [Declaring prompts per agent (the hook folder)](#declaring-prompts-per-agent-the-hook-folder)
+  - [The composition order](#the-composition-order)
+  - [Injecting prompt content at each cycle](#injecting-prompt-content-at-each-cycle)
+  - [The non-sticky reset (no accumulation)](#the-non-sticky-reset-no-accumulation)
+  - [The hooks keep full control](#the-hooks-keep-full-control)
+  - [Reading the composed prompt (`GET /prompt`)](#reading-the-composed-prompt-get-prompt)
 - [Hooks — the extension surface](#hooks--the-extension-surface)
   - [What a hook is](#what-a-hook-is)
   - [The full list of hooks (reference)](#the-full-list-of-hooks-reference)
@@ -170,6 +178,183 @@ the same pattern already covers `calculator` (see
 
 ---
 
+## Prompting — the content layer
+
+A tool is what the model can *do*; a prompt is what it *knows and how it
+behaves*. This section is the content side of the same hook system. Where
+tools are opt-in per agent via a *strict whitelist*, prompting is **opt-in per
+agent via declared content plus per-round injection** — and, exactly like tools,
+**the hooks keep full control over the outcome.**
+
+The layer is deliberately additive: every existing hook slot still fires in the
+documented order, and a hook that sets `ctx.system_prompt` (or edits
+`ctx.messages`) overrides everything the content layer does. What the content
+layer gives you is a stable, ordered, declarative way to compose a prompt from
+four pieces instead of hand-rolling a sticky string.
+
+### The four channels
+
+| channel | meaning | lifecycle | source (per agent) | how it's injected at each cycle |
+|---|---|---|---|---|
+| **identity** | who the agent is (persona, role) | sticky for the run; immutable reference `ctx.base_prompt` | `Agent(system_prompt=…)` > the agent's `prompt.md` (`Hooks.prompt`) > built-in default | carried in `ctx.system_prompt`; `before_llm` may specialize it |
+| **context** | the *situation* this round (RAG chunks, date, current state) | **per-round, non-sticky** | the agent's `context.md` (`Hooks.context`) baseline | core seeds `ctx.context` from the baseline each round; `before_llm` may replace it; folded into the system message |
+| **examples** | few-shot demonstrations of desired behaviour | **per-round, non-sticky** | the agent's `examples.jsonl` (`Hooks.examples`) baseline | core seeds `ctx.examples` from the baseline each round; composed as message pairs between system and history |
+| **addendum** | a short *this-turn* note ("be especially careful") | **per-round, non-sticky** | set by a hook each round in `before_llm` | folded into the system message, last |
+
+Only **identity** is sticky across turns (it is the run's established prompt,
+and the existing "system prompt (dynamic)" rules still apply to it). The other
+three are rebuilt every round so **one cycle's tweak never leaks into the next**
+(see [non-sticky reset](#the-non-sticky-reset-no-accumulation)).
+
+### Declaring prompts per agent (the hook folder)
+
+An agent's prompt content is plain files in its hooks folder
+(`hook_modules/<agent_name>/`, or the `hook_modules/` root for the main agent):
+
+| file | feeds | format |
+|---|---|---|
+| `prompt.md` | identity | the file's text (trimmed), becomes `base_prompt` / the system message when no explicit `system_prompt` is passed |
+| `context.md` | context baseline | the file's text (trimmed), the per-round seed for `ctx.context` |
+| `examples.jsonl` | examples baseline | one JSON object per non-blank line; each line is a role message (`{"role","content"}`) — see [composition order](#the-composition-order) |
+
+All three are **optional** — omit a file and that channel is simply `None` /
+empty. This is the same "promotion is a plain copy" model as hook modules: drop
+the file, done; delete it to turn the channel off. A file in an agent's
+subdirectory applies only to that agent (replace semantics, like hooks); the
+root's files are the main agent's and the fallback.
+
+**Priority for identity** (highest wins): an explicit
+`Agent(system_prompt=…)` argument **>** the agent's `prompt.md` **>** the built-in
+`DEFAULT_SYSTEM_PROMPT`. An agent's `enter_agent` / `before_llm` may still
+specialize `ctx.system_prompt` after either — that is unchanged.
+
+**A module can also declare content.** A `make()` may return `Hooks(prompt=…,
+context=…, examples=…)` instead of (or in addition to) a file (the
+`experiments/system_prompt.py`-style pattern, but for declared content). On a
+conflict in the same folder, a **file wins over a module's declaration**, and
+multiple modules still merge "alphabetically last wins".
+
+`examples.jsonl` lines are the same OpenAI role-message shape you already see on
+the wire, which is what lets a few-shot example *teach tool use* — a sequence that
+includes `assistant` messages with `tool_calls` and the matching `role: "tool"`
+results (see [composition order](#the-composition-order)).
+
+### The composition order
+
+`agent_seed.prompting.compose_prompt` renders, in this fixed order:
+
+1. **one** `role: "system"` message = `compose_system(identity, context, addendum)`
+   — the three sections joined by blank lines, whitespace stripped, empty
+   sections dropped. This keeps the existing invariant: **exactly one system
+   message, at position 0**.
+2. the **examples** (a contiguous run of role/content message pairs, or richer
+   messages including tool calls),
+3. the stored **history**.
+
+So the model sees:
+
+```
+system:  <identity>
+
+         <context block>
+
+         <this-turn addendum>
+user/assistant/role:tool ...   # examples (optional)
+<history: user, assistant, tool, ...>
+```
+
+`compose_system` guarantees backward compatibility: with no context and no
+addendum it returns the identity unchanged — i.e. byte-identical to what the
+core sent before this layer existed. And `normalize_examples` passes the declared
+message list through as a clean (deep-copied) list, dropping items that lack a
+`role` — it never loses the tool_call/tool/result shape.
+
+### Injecting prompt content at each cycle
+
+This is the direct answer to *"inject clear prompts at the beginning and at
+each cycle."* The beginning is the **identity** (declared once, above). Each
+cycle is the **context + addendum + (optionally) examples** — and you inject
+them per round from a hook:
+
+```python
+def before_llm(ctx: RunContext) -> None:
+    # Re-seed the situation every round from your own source. Non-sticky: a
+    # value you set here applies to THIS round only; next round is re-seeded.
+    ctx.context = current_rag_chunk()            # the "situation" this round
+    ctx.addendum = "Today is 2026-10-27. Be concise."  # a this-turn note
+
+hooks = Hooks(before_llm=before_llm)
+```
+
+Because `ctx.context` and `ctx.addendum` fold into the single system message
+after `before_llm`, and `ctx.messages` is your message zone, you can also inject
+a full per-round block (the established escape hatch at
+`test_hooks.py::test_before_llm_injection_is_per_request_not_history`):
+
+```python
+def inject(ctx: RunContext) -> None:
+    ctx.messages.append({"role": "system", "content": build_rag_block()})
+```
+
+### The non-sticky reset (no accumulation)
+
+The old contract forced every hook to *recompute from `base_prompt` every round*
+or risk the documented `!` → `!!` drift (`test_hooks.py::test_accumulating_hook_is_hook_error_not_core`).
+The per-round fields make that trap disappear:
+
+- **identity** stays sticky (unchanged contract), so a `system_prompt` change
+  still persists until overwritten.
+- **context / examples / addendum** are **reset by the core each round** from the
+  agent's declared baselines *before* `before_llm` runs. A value a hook sets in
+  round N reflects on the wire for round N, but round N+1 is re-seeded from the
+  baseline — so a one-cycle injection can never accumulate.
+
+What this means concretely for a hook (round 1 sets a special context, round 2
+doesn't):
+
+```
+round 1 wire:  identity + (hook's round-1 context) + (hook's round-1 addendum)
+round 2 wire:  identity + (agent's context.md baseline)
+```
+
+No `"!"` doubling, no re-assertion discipline required. The sticky behaviour
+you relied on for identity is preserved exactly.
+
+### The hooks keep full control
+
+The content layer is a **default composition, not a lock**. In every case the
+hooks win:
+
+| if a hook … | then … |
+|---|---|
+| sets `ctx.system_prompt` in `before_llm` | it overrides the declared identity on the wire (and stays sticky) |
+| sets `ctx.context` / `ctx.addendum` | it replaces that round's baseline for the system message |
+| edits `ctx.messages` directly | it is the hook's message zone — append, replace, or reorder freely |
+| sets `ctx.examples` | composes for that round |
+| wants the pre-layer behaviour | set nothing; the identity-only path is byte-identical |
+
+The three **system-block** sections (identity, context, addendum) are the core's
+canonical channel (re-applied to `messages[0]` after `before_llm`); the
+**examples** and any free-form context blocks live in `ctx.messages` (the hook's
+zone, applied at compose time). That is the whole division of labour.
+
+### Reading the composed prompt (`GET /prompt`)
+
+`GET /prompt` returns the composed pieces so a frontend or a human can *see*
+what the core is about to send — without touching it. See `protocol.md` for the
+exact payload. In the REPL you can inspect it from the backend directly:
+
+```
+curl 'http://127.0.0.1:8787/prompt?agent_name=alpha'
+curl 'http://127.0.0.1:8787/prompt?session_id=<id>&live=true'   # what it just sent
+```
+
+It is read-only (no hooks fired, no LLM call, no mutation), and it mirrors
+`GET /tools?agent_name=…` in spirit: it resolves the *agent's* declared content
+against a scratch run-context.
+
+---
+
 ## Hooks — the extension surface
 
 A **hook** is a plain Python function you attach to a fixed point in the agent
@@ -295,7 +480,7 @@ This is the most important part of the model. A `RunContext` falls into
 
 | | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          | **working state** (set by the core / a tool call or turn) |
 |---|----------------------------------------|--------------------------------------------------|------------------------------------------------------------|
- | fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `base_model`, `current_model`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round` | `tool_call`, `tool_result`, `final_answer`, `turn_usage` |
+  | fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `base_model`, `current_model`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round`, `context`, `examples`, `addendum` | `tool_call`, `tool_result`, `final_answer`, `turn_usage` |
  | core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round | `tool_call`/`tool_result` are set for one tool call; `final_answer` and `turn_usage` are set once per turn in `_finish_turn` |
 | hook behavior | may read; may write once → the change **persists** ("sticky") until changed again | may read / rewrite *for this request only* | read the call's data; rewrite `tool_result` (via `after_tool_call`) or `final_answer` (via `prepare`/`finish`) — not persisted beyond the call / turn |
 
@@ -307,6 +492,12 @@ Consequences a hook can rely on:
   changed value each turn.
 - `ctx.messages`, `ctx.tools`, `ctx.tool_loop_round` are **rebuilt** before
   each `before_llm`. Do not rely on what you saw last request; recompute it.
+  - `ctx.context`, `ctx.examples`, `ctx.addendum` are **seeded fresh from the
+    active agent's baselines** (`Hooks.context` / `Hooks.examples`; addendum
+    starts empty) at the start of each round, *then* `before_llm` may set them.
+    This is the "non-sticky" prompting channel: a value you set for one round
+    does **not** carry to the next (contrast the sticky fields above). See
+    [Non-sticky reset](#the-non-sticky-reset-no-accumulation).
  - `ctx.usage` accumulates across the run. `ctx.turn_usage` is the **per-turn**
    slice of it (the tokens this turn added, summed across every LLM call the
    turn made). The core sets it in `_finish_turn`; the backend surfaces both on
@@ -390,9 +581,14 @@ class RunContext:
     extras: dict                # HOOKS ONLY — flat keys, run-scoped
 
     # per-request (rebuilt by the core before each before_llm)
-    tool_loop_round: int        # core (0-based)
-    messages: list[dict]        # exact list the LLM will see THIS call
-    tools: list[dict]           # tool schemas offered THIS call
+    tool_loop_round: int            # core (0-based)
+    messages: list[dict]            # exact list the LLM will see THIS call
+    tools: list[dict]               # tool schemas offered THIS call
+    # prompting inputs — NON-STICKY: seeded from the agent's baselines each
+    # round, then before_llm may adjust them (see "Prompting — the content layer")
+    context: str | None             # per-round context block (context.md baseline, or hook-set)
+    examples: list[dict] | None     # per-round few-shot [{"role","content"}] (examples.jsonl baseline)
+    addendum: str | None            # per-turn note, rendered last into the system message (hook-set)
 
     # per-call / per-turn working state
     tool_call: dict | None      # per-call: {"name","arguments"} or None (veto)
@@ -982,7 +1178,7 @@ Breaking any of these is a **major** change.
     — there is no inheritance or "always-on" base set. A hook may *narrow* a
     call (`before_tool_call`) or change this round's offer (`ctx.tools`), but
     it can never *re-allow* a tool the whitelist already rejected.
-13. **Model change is a gated, atomic commit.** The run's LLM is
+ 13. **Model change is a gated, atomic commit.** The run's LLM is
     `ctx.current_model` (a sticky run-scoped field, seeded from
     `ctx.base_model` at construction). The only sanctioned way for a
     *user-facing* change to be committed is `Agent.set_model(candidate)`,
@@ -994,6 +1190,35 @@ Breaking any of these is a **major** change.
     bypasses `on_model_change` by construction (it is a per-agent binding,
     not a mid-turn switch). The core **never** resets `current_model` on a
     switch or `reset()`; only the incoming agent's hooks may.
+ 14. **Prompting is a default composition, not a lock.** The content layer
+    (the agent's declared `prompt` / `context` / `examples` plus the per-round
+    `ctx.context` / `ctx.examples` / `ctx.addendum` fields and
+    `agent_seed.prompting.compose_prompt`) is a *convenience surface*: it
+    renders a stable, ordered prompt from the agent's declared content and the
+    per-round fields. Hooks keep full control and win in every case —
+    `before_llm` may set or replace `ctx.system_prompt`, `ctx.context`,
+    `ctx.addendum`, `ctx.examples`, or edit `ctx.messages` directly. The three
+    *system-block* channels (`system_prompt`, `context`, `addendum`) are the
+    core's canonical system-message source (folded into `messages[0]` after
+    `before_llm`); `examples` and any free-form context blocks live in
+    `ctx.messages` (the hook's zone). A hook that sets nothing gets the
+    backward-compatible identity-only prompt (byte-identical to before the
+    layer). See "Prompting — the content layer".
+ 15. **Per-round prompting fields are non-sticky.** `ctx.context`, `ctx.examples`
+    and `ctx.addendum` are **seeded fresh from the active agent's baselines**
+    (`Hooks.context` / `Hooks.examples`; addendum starts empty) at the start of
+    each round, before `before_llm`. A value a hook sets for one round reflects
+    on the wire that round only and is re-seeded (reset) the next round — so a
+    one-cycle injection never accumulates across turns (contrast the sticky
+    run-scoped fields, including `ctx.system_prompt` whose "recompute from
+    base" discipline still applies). See [Non-sticky reset](#the-non-sticky-reset-no-accumulation).
+ 16. **Declared prompt content is per-agent opt-in (append-only).** An agent's
+    `prompt` / `context` / `examples` come from its hook folder's files
+    (`prompt.md` / `context.md` / `examples.jsonl`) or a module's declarative
+    `Hooks` data fields (a file wins over a module in the same folder; a missing
+    file and a `None` module value both mean "no content declared for that
+    channel"). Adding a new data field (with a `None`/empty default) is a minor
+    bump; renaming or removing one is a major break — mirroring rules 3–4.
 
 ### Extending the core with new slots
 

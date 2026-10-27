@@ -25,6 +25,7 @@ from typing import Any
 from .discovery import get_hooks_for_agent
 from .hooks import Hooks, RunContext
 from .llm import LLMConfig, LLMProbe, OpenAICompatClient
+from .prompting import compose_prompt, compose_system
 from .tools import ToolError, ToolRegistry
 from .tools import registry as default_registry
 
@@ -92,7 +93,7 @@ class Agent:
         self,
         client: OpenAICompatClient,
         registry: ToolRegistry,
-        system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        system_prompt: str | None = None,
         hooks: Hooks | None = None,
         run_id: str | None = None,
         session_id: str | None = None,
@@ -117,9 +118,13 @@ class Agent:
             ctx.session_id = session_id
         ctx.agent_name = agent_name
         # The base prompt is immutable for the run; the system prompt is the
-        # current (potentially hook-modified) value.
-        ctx.base_prompt = system_prompt
-        ctx.system_prompt = system_prompt
+        # current (potentially hook-modified) value. Precedence: the explicit
+        # system_prompt argument > the agent's declared prompt (its Hooks.prompt,
+        # loaded from prompt.md via discovery) > the built-in default. An
+        # agent's enter_agent may still specialize ctx.system_prompt afterward.
+        prompt_text = system_prompt or self.hooks.prompt or DEFAULT_SYSTEM_PROMPT
+        ctx.base_prompt = prompt_text
+        ctx.system_prompt = prompt_text
         # Establish the models served by this run. base_model is the
         # immutable reference (what the caller's client was built with);
         # current_model starts equal and is what the core actually calls.
@@ -387,12 +392,25 @@ class Agent:
 
         for round_idx in range(MAX_TOOL_ROUNDS):
             ctx.tool_loop_round = round_idx
+            # Per-round prompting inputs are non-sticky: seed them from the
+            # active agent's declared baselines (Hooks.context / Hooks.examples)
+            # every round so a hook's one-round tweak never carries forward,
+            # then before_llm may adjust them (docs/manual.md "Prompting").
+            ctx.context = self.hooks.context
+            ctx.examples = list(self.hooks.examples) if self.hooks.examples else None
+            ctx.addendum = None
             # Per-request working state, rebuilt from the current session
-            # history. ``system_prompt`` is the run's current (possibly
-            # hook-modified) value; ``before_llm`` may further replace it —
-            # see ``docs/manual.md``, "System prompt (dynamic)".
-            ctx.messages = [{"role": "system", "content": ctx.system_prompt or ""}]
-            ctx.messages.extend(self.history)
+            # history. compose_prompt renders system (identity + context +
+            # addendum) -> examples -> history. ``before_llm`` may override the
+            # canonical fields (ctx.system_prompt / ctx.context / ctx.examples /
+            # ctx.addendum) or touch ctx.messages directly (escape hatch).
+            ctx.messages = compose_prompt(
+                ctx.system_prompt,
+                self.history,
+                ctx.context,
+                ctx.examples,
+                ctx.addendum,
+            )
             # Offer only what the active agent's whitelist allows (strict).
             # None/[] -> no tools offered. ``before_llm`` may still adjust
             # ``ctx.tools`` afterwards (existing escape hatch) or change
@@ -400,12 +418,15 @@ class Agent:
             # the execute-path veto) — see ``docs/manual.md``.
             ctx.tools = self.registry.schemas_for(ctx.allowed_tools)
             call_hook(self.hooks.before_llm)
-            # A hook may have set a new system_prompt; apply it to the
-            # first (system) message. If the hook already edited messages[0]
-            # directly, this overwrites — the canonical channel is
-            # ``ctx.system_prompt``.
-            if ctx.system_prompt is not None:
-                ctx.messages[0]["content"] = ctx.system_prompt
+            # The canonical system-channel fields (system_prompt / context /
+            # addendum) are applied to the first message after before_llm, so a
+            # hook that rewrote them is reflected here (compose_system folds
+            # them, dropping empties). A hook that edited messages[0] directly
+            # is overwritten — the canonical channel is ctx.system_prompt + the
+            # per-round fields.
+            ctx.messages[0]["content"] = compose_system(
+                ctx.system_prompt, ctx.context, ctx.addendum
+            )
 
             completion = self.client.chat(
                 ctx.messages,
@@ -488,10 +509,16 @@ class Agent:
             call_hook(self.hooks.on_round)
 
         # Tool round-trips exhausted: ask for a final answer without tools.
-        # (before_llm is not called here — this is the forced fallback.)
+        # (before_llm is not called here — this is the forced fallback; the
+        # per-round prompting inputs were seeded in the loop above and remain set.)
         ctx.tool_loop_round = MAX_TOOL_ROUNDS
-        ctx.messages = [{"role": "system", "content": ctx.system_prompt or ""}]
-        ctx.messages.extend(self.history)
+        ctx.messages = compose_prompt(
+            ctx.system_prompt,
+            self.history,
+            ctx.context,
+            ctx.examples,
+            ctx.addendum,
+        )
         ctx.tools = []
         completion = self.client.chat(
             ctx.messages,

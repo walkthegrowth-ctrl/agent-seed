@@ -327,6 +327,142 @@ def test_agents_endpoint_lists_subdirs(monkeypatch, tmp_path):
     assert response.json() == {"agents": ["alpha", "gamma"]}
 
 
+# -- /prompt ---------------------------------------------------------------------
+
+
+def test_prompt_endpoint_scratch_default(monkeypatch, tmp_path):
+    """Scratch (default) resolves the agent's declared prompts from its folder."""
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
+    from agent_seed.core import DEFAULT_SYSTEM_PROMPT
+    from agent_seed.discovery import reset_cache
+
+    # Empty folder: the scratch view falls back to the default identity.
+    reset_cache()
+    app = server.create_app(ToolRegistry())
+    with TestClient(app) as test_client:
+        body = test_client.get("/prompt").json()
+        assert body["live"] is False
+        assert body["identity"] == DEFAULT_SYSTEM_PROMPT
+        assert body["context"] is None
+        assert body["examples"] == []
+        assert body["addendum"] is None
+        assert body["system"] == DEFAULT_SYSTEM_PROMPT
+
+    # Populated folder: scratch reflects the declared files.
+    (tmp_path / "prompt.md").write_text("You are alpha.\n")
+    (tmp_path / "context.md").write_text("state=on\n")
+    (tmp_path / "examples.jsonl").write_text(
+        '{"role": "user", "content": "e1"}\n{"role": "assistant", "content": "a1"}\n'
+    )
+    reset_cache()
+    app = server.create_app(ToolRegistry())
+    with TestClient(app) as test_client:
+        body = test_client.get("/prompt").json()
+        assert body["live"] is False
+        assert body["identity"] == "You are alpha."
+        assert body["context"] == "state=on"
+        assert body["examples"] == [
+            {"role": "user", "content": "e1"},
+            {"role": "assistant", "content": "a1"},
+        ]
+        # system is composed: identity + context block (blank-line separated).
+        assert body["system"] == "You are alpha.\n\nstate=on"
+        assert body["addendum"] is None
+
+
+def test_prompt_endpoint_agent_name_selects_subdir(monkeypatch, tmp_path):
+    (tmp_path / "alpha").mkdir(parents=True)
+    (tmp_path / "alpha" / "prompt.md").write_text("ALPHA IDENTITY\n")
+    (tmp_path / "beta").mkdir(parents=True)
+    (tmp_path / "beta" / "prompt.md").write_text("BETA IDENTITY\n")
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
+    from agent_seed.discovery import reset_cache
+
+    reset_cache()
+    app = server.create_app(ToolRegistry())
+    with TestClient(app) as test_client:
+        alpha = test_client.get("/prompt", params={"agent_name": "alpha"}).json()
+        beta = test_client.get("/prompt", params={"agent_name": "beta"}).json()
+        assert alpha["identity"] == "ALPHA IDENTITY"
+        assert beta["identity"] == "BETA IDENTITY"
+
+
+def test_prompt_endpoint_unknown_agent_falls_back_to_root(monkeypatch, tmp_path):
+    """Unknown agent name falls back to the (empty) root: default identity."""
+    from agent_seed.core import DEFAULT_SYSTEM_PROMPT
+    from agent_seed.discovery import reset_cache
+
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
+    reset_cache()
+    app = server.create_app(ToolRegistry())
+    with TestClient(app) as test_client:
+        body = test_client.get("/prompt", params={"agent_name": "nope"}).json()
+        assert body["live"] is False
+        assert body["identity"] == DEFAULT_SYSTEM_PROMPT
+
+
+def test_prompt_endpoint_live_requires_session_and_reports_unknown(monkeypatch):
+    """live=true without a session_id is 400; with an unknown id is 404."""
+    app = server.create_app(ToolRegistry())
+    with TestClient(app) as test_client:
+        assert test_client.get("/prompt", params={"live": "true"}).status_code == 400
+        assert (
+            test_client.get("/prompt", params={"session_id": "nope", "live": "true"}).status_code
+            == 404
+        )
+
+
+def test_prompt_endpoint_live_reflects_last_composed_value(monkeypatch, tmp_path):
+    """live=1 with a session_id returns that session's last composed prompt
+    (the sticky identity + that round's context/addendum), not the scratch view."""
+    from agent_seed.core import DEFAULT_SYSTEM_PROMPT
+    from agent_seed.discovery import reset_cache
+    from agent_seed.hooks import Hooks, RunContext
+    from agent_seed.llm import Completion
+
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    reset_cache()
+
+    def set_addendum(ctx: RunContext) -> None:
+        ctx.addendum = "round-note"
+
+    hooks = Hooks(context="ctx-baseline", before_llm=set_addendum)
+
+    script = [Completion(content="ok")]
+
+    def fake_client_factory(cfg):
+        class _Fake:
+            def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+                return script.pop(0)
+
+        return _Fake()
+
+    monkeypatch.setattr(server, "OpenAICompatClient", fake_client_factory)
+    app = server.create_app(ToolRegistry(), hooks=hooks)
+    with TestClient(app) as test_client:
+        # Create a session and run one turn so the agent's per-round fields are set.
+        with test_client.stream("POST", "/chat", json={"message": "hi"}) as response:
+            session_id = response.headers["x-session-id"]
+            assert response.status_code == 200
+
+        # live=1 reflects the session's last composed value (addendum "round-note",
+        # context baseline "ctx-baseline") — distinct from the scratch view, which
+        # would report addendum=None (scratch has no live round to read).
+        live = test_client.get("/prompt", params={"session_id": session_id, "live": "true"}).json()
+        assert live["live"] is True
+        assert live["session_id"] == session_id
+        assert live["identity"] == DEFAULT_SYSTEM_PROMPT
+        assert live["context"] == "ctx-baseline"
+        assert live["addendum"] == "round-note"
+        assert live["system"] == (DEFAULT_SYSTEM_PROMPT + "\n\nctx-baseline\n\nround-note")
+
+        # Contrast: the scratch view for the same agent reports addendum=None.
+        scratch = test_client.get("/prompt").json()
+        assert scratch["live"] is False
+        assert scratch["addendum"] is None
+
+
 def test_chat_agent_name_selects_subdir_hooks(monkeypatch, tmp_path):
     # Use an after_tool_call hook: it rewrites ctx.tool_result, which the
     # backend emits in the SSE `tool` event — so the marker appears on the

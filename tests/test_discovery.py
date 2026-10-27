@@ -130,6 +130,87 @@ def test_module_make_wrong_type_fails(tmp_path):
         discover(tmp_path)
 
 
+# -- prompt-content files (prompt.md / context.md / examples.jsonl) --------------
+
+
+def test_loads_prompt_context_and_examples_files(tmp_path):
+    (tmp_path / "prompt.md").write_text("You are alpha.\n")
+    (tmp_path / "context.md").write_text("Current: date=2026-10-27\n")
+    (tmp_path / "examples.jsonl").write_text(
+        '{"role": "user", "content": "q1"}\n{"role": "assistant", "content": "a1"}\n\n'
+    )
+    hooks = discover(tmp_path)
+    assert hooks.prompt == "You are alpha."
+    assert hooks.context == "Current: date=2026-10-27"
+    assert hooks.examples == [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+    ]
+
+
+def test_prompt_files_are_optional(tmp_path):
+    hooks = discover(tmp_path)
+    assert hooks.prompt is None
+    assert hooks.context is None
+    assert hooks.examples is None
+
+
+def test_prompt_md_overrides_module_prompt(tmp_path):
+    (tmp_path / "hooks.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def make() -> Hooks:\n    return Hooks(prompt='from module')\n"
+    )
+    (tmp_path / "prompt.md").write_text("from file\n")
+    hooks = discover(tmp_path)
+    assert hooks.prompt == "from file"
+
+
+def test_examples_jsonl_invalid_json_raises_discoveryerror(tmp_path):
+    (tmp_path / "examples.jsonl").write_text("not-json\n")
+    with pytest.raises(DiscoveryError, match="examples file"):
+        discover(tmp_path)
+
+
+def test_examples_jsonl_requires_objects(tmp_path):
+    (tmp_path / "examples.jsonl").write_text('["not", "an", "object"]\n')
+    with pytest.raises(DiscoveryError, match="expected a JSON object"):
+        discover(tmp_path)
+
+
+def test_discovery_prompt_fields_are_merged_last_file_wins(tmp_path):
+    (tmp_path / "a_first.py").write_text(
+        "from agent_seed.hooks import Hooks\ndef make() -> Hooks:\n    return Hooks(context='a')\n"
+    )
+    (tmp_path / "b_second.py").write_text(
+        "from agent_seed.hooks import Hooks\ndef make() -> Hooks:\n    return Hooks(context='b')\n"
+    )
+    hooks = discover(tmp_path)
+    assert hooks.context == "b"
+
+
+# -- prompt precedence through Agent ---------------------------------------------
+
+
+def test_agent_no_explicit_prompt_uses_hooks_prompt_field(tmp_path):
+    (tmp_path / "prompt.md").write_text("FILE IDENTITY\n")
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
+    reset_cache()
+    from agent_seed.core import DEFAULT_SYSTEM_PROMPT
+    from agent_seed.tools import ToolRegistry as _Registry
+
+    class _NoOpClient:
+        config = None
+
+        def chat(self, *a, **k):
+            raise AssertionError("no chat expected")
+
+    agent = Agent(_NoOpClient(), _Registry())
+    assert agent.base_prompt == "FILE IDENTITY"
+    assert agent.base_prompt != DEFAULT_SYSTEM_PROMPT
+    monkeypatch.undo()
+
+
 def test_import_error_fails(tmp_path):
     _write(tmp_path, "bad.py", "raise ImportError('nope')\n")
     with pytest.raises(DiscoveryError, match="failed to import"):

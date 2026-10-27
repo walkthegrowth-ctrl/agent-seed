@@ -8,6 +8,8 @@ Wire format (see docs/protocol.md):
     GET  /tools   -> this app's tool schemas (OpenAI function form) + names
                         (with ?agent_name=<n>: only the tools that agent's
                         whitelist allows; without: the app's whole catalog)
+    GET  /prompt  -> the composed prompt (identity, context, addendum, examples);
+                        scratch (deterministic) or live=1 with ?session_id=<id>
     POST /reset   body {"session_id"} -> clears that session's history
 """
 
@@ -23,10 +25,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ... import __version__
-from ...core import Agent, _is_number
+from ...core import DEFAULT_SYSTEM_PROMPT, Agent, _is_number
 from ...discovery import get_hooks_for_agent, list_agents
 from ...hooks import Hooks, RunContext
 from ...llm import LLMConfig, LLMConfigError, OpenAICompatClient
+from ...prompting import compose_system, normalize_examples
 from ...tools import ToolRegistry
 from ...tools import registry as default_registry
 
@@ -335,6 +338,53 @@ def create_app(
     def agents() -> dict[str, Any]:
         """List discoverable agent names (subdirs of the hooks root)."""
         return {"agents": list_agents()}
+
+    @app.get("/prompt")
+    def prompt(
+        session_id: str | None = None, agent_name: str | None = None, live: bool = False
+    ) -> JSONResponse:
+        """Read-only view of the composed prompt: identity, context, addendum, examples.
+
+        ``live=true`` with a ``session_id`` reflects that session's last composed
+        value (the sticky identity a hook may have set, plus that round's
+        context/examples/addendum). Otherwise the scratch (deterministic) view is
+        resolved from the selected agent's declared baselines — no live round, no
+        hooks fired, mirroring ``GET /tools?agent_name=``.
+        """
+        if live:
+            if session_id is None:
+                return JSONResponse({"error": "live=true requires a session_id"}, status_code=400)
+            agent = sessions.agent(session_id)
+            if agent is None:
+                return JSONResponse({"error": f"no such session: {session_id}"}, status_code=404)
+            ctx = agent.context
+            return JSONResponse(
+                {
+                    "agent_name": ctx.agent_name,
+                    "session_id": session_id,
+                    "live": True,
+                    "system": compose_system(ctx.system_prompt, ctx.context, ctx.addendum),
+                    "identity": ctx.system_prompt,
+                    "context": ctx.context,
+                    "addendum": ctx.addendum,
+                    "examples": normalize_examples(ctx.examples),
+                }
+            )
+        # Scratch: resolve the agent's hooks (fall back to the root) and use
+        # the declared baselines as the per-round seed, exactly as the core does.
+        hooks = get_hooks_for_agent(agent_name)
+        identity = hooks.prompt or DEFAULT_SYSTEM_PROMPT
+        return JSONResponse(
+            {
+                "agent_name": agent_name,
+                "live": False,
+                "system": compose_system(identity, hooks.context, None),
+                "identity": identity,
+                "context": hooks.context,
+                "addendum": None,
+                "examples": normalize_examples(hooks.examples),
+            }
+        )
 
     @app.post("/reset")
     def reset(body: SessionRequest) -> dict[str, Any]:

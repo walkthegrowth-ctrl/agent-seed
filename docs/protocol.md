@@ -166,6 +166,62 @@ agent's hooks to that subdirectory.
 An empty list (or no `/agents` support on an older backend) means only the
 default agent (the `hook_modules/` root) is available.
 
+## `GET /prompt`
+
+`200` — a read-only, compositional view of the prompt the core is about to
+send (or, with `live`, was just sending). This is a *diagnostic / debugging*
+endpoint: it lets a frontend or a human see the composed system message, the
+declared context and addendum section, and the few-shot example list.
+
+Query parameters (all optional):
+
+- `agent_name` (string) — which agent's hooks / baseline to resolve against.
+  Without it the default (root) agent is used. Mirrors `GET /tools?agent_name=…`.
+- `session_id` (string) — with `live=true`, the live session whose last composed
+  value is reported. Without `live=true` this parameter is ignored.
+- `live` (bool) — `true` for the session's last composed value (what was just
+  sent, including any before_llm hook adjustments); the default `false` is the
+  deterministic scratch view, resolved from the selected agent's declared
+  baselines (its hook folder's `prompt.md` / `context.md` / `examples.jsonl`).
+
+Response shape:
+
+```json
+{
+  "agent_name": "alpha",           // null for the default agent
+  "session_id": "<id>",            // present only when live=true with session_id
+  "live": false,                   // live=true means "from that session's last turn"
+  "identity": "You are alpha.",    // the resolved identity (prompt.md or Hooks.prompt or default)
+  "context": "state=on",           // the per-round context block (context.md baseline or null)
+  "addendum": null,                // the per-turn addendum (live only; null in scratch)
+  "examples": [                    // the few-shot message list (canonical role/content shape)
+    { "role": "user", "content": "e1" },
+    { "role": "assistant", "content": "a1" }
+  ],
+  "system": "You are alpha.\n\nstate=on"   // compose_system(identity, context, addendum)
+}
+```
+
+- `system` is the exact text of the first message the core would send: identity
+  folded with (optionally) context and addendum via
+  `compose_system` (see `docs/manual.md`, "Prompting").
+- `examples` is the canonical `[{"role","content"}, …]` shape (same as the
+  OpenAI wire) — it is what `compose_prompt` places between the system message
+  and the stored history.
+- `addendum` is non-null only when `live=true` and the last round's hook set it.
+- `agent_name` / `session_id` echo back what was resolved, so the caller knows
+  which one of the two views it got.
+- Read-only: this endpoint does not mutate the active agent's state, does not
+  fire hooks, and does not change the LLM. Mirrors `GET /tools?agent_name=…`
+  in that way (resolves the *agent's own* declared baselines against a scratch
+  `RunContext` — no side-effect on the live agent).
+
+Status codes:
+
+- `200` — view resolved (scratch by default; `live` when the named session exists).
+- `400` — `live=true` with no `session_id`.
+- `404` — `live=true` with a `session_id` that has no live session.
+
 ## `POST /reset`
 
 Body: `{ "session_id": "<id>" }` → `200 { "ok": true, "session_id": "<id>" }`.
