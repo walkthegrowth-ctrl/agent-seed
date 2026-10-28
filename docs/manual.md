@@ -12,6 +12,9 @@ Companion documents:
 - `docs/protocol.md` — the HTTP/SSE wire contract between any frontend and the
   backend.
 - `docs/architecture.md` — layers, data flow, and design decisions.
+- `docs/howto-craft-an-agent.md` — a no-code, 10-minute walk-through for crafting
+  your first tailor-made agent (voice → tools → one rule). Start here if you're
+  new; this manual is the full reference behind it.
 - `README.md` — getting started: setup, config, and running.
 
 ## Contents
@@ -852,6 +855,10 @@ agent.agent_name                                        # read it back
 ```
 
 #### Your first agent (end to end)
+
+> New here and not a coder? The 10-minute, no-code walk-through
+> [`howto-craft-an-agent.md`](howto-craft-an-agent.md) builds your first agent
+> step by step (voice → tools → one rule) and links back to here for depth.
 
 An **agent** is a subdirectory of the hooks root holding ordinary hook modules
 (a `def make() -> Hooks` per file, see ["The contract:

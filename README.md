@@ -11,6 +11,8 @@ Ultra minimalistic LLM agent with tool calling.
 - **Extensibility** — a frozen hook surface (`Hooks` + `RunContext`) that plugs
   behavior into the loop without subclassing, and a `hook_modules/` folder of
   promoted hooks that is auto-discovered once per process (see `docs/manual.md`).
+  Want a tailor-made agent of your own? The 10-minute, no-code walkthrough is
+  `docs/howto-craft-an-agent.md`.
 
 The core has no idea whether it is being driven by a terminal, a browser, or
 `curl`. The protocol is documented, so adding a web/TUI frontend is a
@@ -132,7 +134,8 @@ hook_modules/           promoted hook modules (the default agent); subdirs are a
 docs/
   architecture.md         layers, data flow, design decisions
   protocol.md             HTTP/SSE wire contract for frontends
-  manual.md               user manual: adding tools + writing/promoting hooks
+   manual.md               user manual: adding tools + writing/promoting hooks
+   howto-craft-an-agent.md no-code walk-through: make your own agent in minutes
 tests/
   conftest.py             FakeLLMClient + script helpers
   test_calculator.py
@@ -163,7 +166,8 @@ tests/
   hook to `hook_modules/` to auto-load it everywhere (see `docs/manual.md`).
 - **Agents.** `hook_modules/<name>/` is an alternate hook set selected by
   `agent_name` (`Agent(agent_name=...)`, `POST /chat`, REPL `/agent`); the root
-  folder is the default agent (see `docs/manual.md`).
+  folder is the default agent (see `docs/manual.md`, and the no-code walk-through
+  `docs/howto-craft-an-agent.md`).
 - **`LLM_MODEL` is required.** The backend returns HTTP 500 if it is unset.
 
 ## License
