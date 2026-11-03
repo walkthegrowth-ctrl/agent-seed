@@ -64,6 +64,9 @@ hooks) lives in `manual.md` — treat it as the source of truth:
 | `agent_seed/backends/http/cli.py` | `agent-seed` entry point (uvicorn). |
 | `agent_seed/frontends/repl/app.py` | `Session` (HTTP client), SSE parse + render, slash-commands. |
 | `agent_seed/frontends/repl/cli.py` | `agent-repl` entry point. |
+| `agent_seed/composer/catalog.py` | Tool catalog: built-in registry tools + the `tools/` "reservoir" (ast-scanned), as `Tool` dataclasses. |
+| `agent_seed/composer/generator.py` | Pure `Spec → Plan → write_plan`: turns a compose spec (voice/tools/context/examples/sign-off) into an agent folder. Reservoir tools are inlined; built-ins whitelisted only. |
+| `agent_seed/composer/cli.py` | `agent-compose` entry point (flags + interactive wizard; `--dry-run`, `--force`, `--list-tools`). |
 
 ## Sessions
 
@@ -108,6 +111,10 @@ the bullets below just point at the relevant section.
   "Hooks — the extension surface".
 - A different *agent* (a distinct hook set) → `hook_modules/<agent_name>/`;
   `manual.md` "Agents: hook subdirectories".
+- **Scaffolding an agent without hand-writing files** → `agent compose`
+  (`agent_seed/composer/`: a pure `Spec → Plan → write_plan` generator plus a
+  tool catalog over the built-in registry and the root `tools/` "reservoir");
+  `manual.md` "Composing an agent (`agent compose`)".
 - New frontend → `protocol.md`; `frontends/repl/app.py::Session` is the
   reference client.
 - New backend transport (e.g. WebSocket, gRPC) → expose `core.Agent` the same

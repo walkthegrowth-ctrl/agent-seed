@@ -289,6 +289,33 @@ def test_no_explicit_and_no_hooks_falls_to_default():
     assert agent.base_prompt == DEFAULT_SYSTEM_PROMPT
 
 
+# -- baseline examples are deep-copied per round (J.3 regression) ---------------
+
+
+def test_mutation_of_ctx_examples_does_not_corrupt_baseline():
+    """The core seeds ``ctx.examples`` from the agent's declared ``hooks.examples``
+    every round. If ``before_llm`` mutates the *contents* of an example in place,
+    that change must NOT leak back into the stored baseline — the next round must
+    re-seed a pristine copy. (Regression: a shallow ``list()`` copy would alias
+    the dicts and corrupt the baseline.)"""
+
+    baseline = [{"role": "user", "content": "BASE-Q"}, {"role": "assistant", "content": "BASE-A"}]
+    hooks = Hooks(
+        examples=baseline,
+        before_llm=lambda ctx: ctx.examples[0].__setitem__("content", "MUTATED"),
+    )
+    client = FakeLLMClient([text_completion("a"), text_completion("b")])
+    agent = Agent(client, ToolRegistry(), hooks=hooks)
+
+    # Round 1: before_llm mutates the seeded copy in place.
+    agent.chat("1")
+    # The baseline must be untouched by the in-place mutation.
+    assert baseline[0]["content"] == "BASE-Q"
+    # Round 2: re-seeded fresh; the mutation from round 1 must not carry over.
+    agent.chat("2")
+    assert baseline[0]["content"] == "BASE-Q"
+
+
 # -- per-round fields are not persisted to history --------------------------------
 
 

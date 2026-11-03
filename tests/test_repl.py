@@ -1,4 +1,10 @@
-from agent_seed.frontends.repl.app import Session, sse_events, sse_events_streaming, unquote
+from agent_seed.frontends.repl.app import (
+    Session,
+    format_tokens,
+    sse_events,
+    sse_events_streaming,
+    unquote,
+)
 
 
 def test_sse_events_streaming_yields_on_blank_line():
@@ -184,3 +190,51 @@ def test_session_test_model_uses_test_endpoint_and_returns_body():
     assert rec.calls[0][0] == "http://fake.invalid/config/test"
     assert out == {"ok": False, "error": "boom"}
     session.close()
+
+
+# -- format_tokens (REPL usage-line renderer) ---------------------------------
+
+
+def test_format_tokens_none_and_empty():
+    assert format_tokens(None) == "—"
+    assert format_tokens({}) == "—"
+
+
+def test_format_tokens_in_out_and_total():
+    usage = {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10}
+    assert format_tokens(usage) == "in=4 out=6 total=10"
+
+
+def test_format_tokens_derives_total_when_missing():
+    usage = {"prompt_tokens": 3, "completion_tokens": 5}
+    assert format_tokens(usage) == "in=3 out=5 total=8"
+
+
+def test_format_tokens_partial_counters_only():
+    # Only prompt present: no in=/out= for the missing slot, no derived total.
+    assert format_tokens({"prompt_tokens": 7}) == "in=7"
+    # Only completion present.
+    assert format_tokens({"completion_tokens": 9}) == "out=9"
+    # Only total present.
+    assert format_tokens({"total_tokens": 42}) == "total=42"
+
+
+def test_format_tokens_bool_is_not_a_number():
+    # `True` is an `int` in Python; it must not be treated as a token count.
+    usage = {"prompt_tokens": True, "completion_tokens": False}
+    assert format_tokens(usage) == "{'prompt_tokens': True, 'completion_tokens': False}"
+
+
+def test_format_tokens_falls_back_to_str_for_non_numeric():
+    assert format_tokens({"prompt_tokens": "lots"}) == "{'prompt_tokens': 'lots'}"
+
+
+def test_format_tokens_prefers_explicit_total():
+    # If both prompt+completion and an explicit total are present, use the
+    # explicit one (do not re-derive).
+    usage = {
+        "prompt_tokens": 1,
+        "completion_tokens": 2,
+        "total_tokens": 100,  # intentionally different from 3
+    }
+    assert format_tokens(usage) == "in=1 out=2 total=100"

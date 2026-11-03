@@ -829,3 +829,85 @@ def test_config_test_endpoint_failure(monkeypatch):
         assert body["ok"] is False
         assert "boom probe" in body["error"]
     mp.undo()
+
+
+def test_config_test_no_base_returns_400_not_fake_default(monkeypatch, tmp_path):
+    """With no base LLM to merge over (LLM_MODEL unset, no pending/app config,
+    and the body supplying neither base_url nor api_key) the probe must return
+    a clear 400 — it must NOT fabricate a default and report a bogus model or a
+    false success."""
+    from tests.conftest import text_completion  # noqa: F401 - parity with _make_app
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+    app = server.create_app(registry)
+    app.state.fakes = []
+
+    mp2 = pytest.MonkeyPatch()
+    mp2.delenv("LLM_MODEL", raising=False)
+    mp2.chdir(tmp_path)  # no .env in CWD
+    mp2.setattr("agent_seed.llm.load_dotenv", lambda *a, **k: False)
+
+    with TestClient(app) as test_client:
+        response = test_client.post("/config/test", json={"model": "candidate"})
+        assert response.status_code == 400
+        body = response.json()
+        assert body["ok"] is False
+        # No fabricated probe ran: there is NO `model` field carrying a made-up
+        # default (the old bug reported model="probe").
+        assert body.get("model") is None
+        assert "latency_ms" not in body or body.get("latency_ms") is None
+    mp2.undo()
+
+
+def test_pending_config_survives_unrelated_chat(monkeypatch, tmp_path):
+    """A config set for session ``X`` before X's first /chat is 'pending'.
+    Chats for a *different* session (``Y``) must not consume or clobber it;
+    X must still adopt its pending config when it is finally created."""
+    from tests.conftest import text_completion
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+    app = server.create_app(registry)
+    app.state.fakes = []
+    mp2 = pytest.MonkeyPatch()
+    mp2.setenv("LLM_MODEL", "env-default")
+
+    def fake_client_factory(cfg):
+        class _Fake:
+            def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+                self.last_chat_config = config
+                return text_completion("ok")
+
+        fake = _Fake()
+        fake.config = cfg
+        app.state.fakes.append(fake)
+        return fake
+
+    mp2.setattr(server, "OpenAICompatClient", fake_client_factory)
+
+    with TestClient(app) as test_client:
+        # 1. Mint X and record a pending config for it (before any /chat).
+        r = test_client.post("/config", json={"session_id": "X", "model": "x-model"})
+        assert r.status_code == 200
+
+        # 2. An unrelated session Y runs a full turn.
+        payload = {"message": "hi", "session_id": "Y"}
+        with test_client.stream("POST", "/chat", json=payload) as resp:
+            assert resp.status_code == 200
+            "".join(resp.iter_text())
+
+        # 3. X's pending config must still be intact (not consumed / 404).
+        got = test_client.get("/config", params={"session_id": "X"})
+        assert got.status_code == 200
+        assert got.json()["llm"]["model"] == "x-model"
+
+        # 4. When X is finally created it adopts its pending model; Y used env.
+        fakes = app.state.fakes
+        assert fakes[0].config.model == "env-default"  # Y started from env
+        payload_x = {"message": "hi", "session_id": "X"}
+        with test_client.stream("POST", "/chat", json=payload_x) as resp:
+            "".join(resp.iter_text())
+        assert app.state.fakes[-1].config.model == "x-model"
+
+    mp2.undo()

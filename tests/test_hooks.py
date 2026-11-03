@@ -615,3 +615,36 @@ def test_system_prompt_experiment_is_dynamic_and_stable_across_turns():
     assert p2.count("[dynamic context:") == 1
     # extras were seeded by ready_session
     assert agent.context.extras.get("session_id") == agent.session_id
+
+
+def test_system_prompt_ready_session_records_change_from():
+    """ready_session records the prior session id when the active session
+    changes, and never records a change on first establishment."""
+    from experiments.system_prompt import make
+
+    agent, _ = _agent([text_completion("a"), text_completion("b")], session_id="s1")
+    agent.hooks = make()
+    # First establishment: no prior session → no "changed_from".
+    agent.chat("1")
+    assert "session_changed_from" not in agent.context.extras
+    assert agent.context.extras.get("session_id") == "s1"
+
+    # Switch sessions: the previous id should be recorded.
+    agent.set_session("s2")
+    agent.chat("2")
+    assert agent.context.extras.get("session_id") == "s2"
+    assert agent.context.extras.get("session_changed_from") == "s1"
+
+
+def test_tool_policy_experiment_pins_whitelist():
+    """experiments/tool_policy.make() sets ctx.allowed_tools to the declared
+    ALLOWED_TOOLS the moment the agent takes over (enter_agent)."""
+    from experiments import tool_policy
+
+    hooks = tool_policy.make()
+    assert hooks.enter_agent is not None
+    ctx = RunContext()
+    hooks.enter_agent(ctx)
+    assert ctx.allowed_tools == list(tool_policy.ALLOWED_TOOLS)
+    # the shipped default is `["calculator"]` (the pattern's canonical case).
+    assert ctx.allowed_tools == ["calculator"]

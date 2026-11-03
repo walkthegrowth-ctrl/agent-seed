@@ -92,7 +92,9 @@ See `docs/howto-craft-an-agent.md` for the step-by-step walk-through.
 
 REPL commands: `/help`, `/reset` (clear server-side session), `/tools`,
 `/usage` (session token usage), `/agent [name]` / `/agents` (switch / list
-agents), `/model` (backend LLM config), `/quit` (or `/exit`). Type `/` alone to
+agents), `/model` (show the session's LLM config), `/model <name>` (probe-then-switch),
+`/model test <name>` (probe without switching), `/model force <name>` (switch
+without a probe), `/quit` (or `/exit`). Type `/` alone to
 open a multi-line block (close with `/` and Enter). Type `/quit` or press
 `Ctrl-D` to exit.
 
@@ -107,7 +109,14 @@ you> /tools
 you> tools: calculator
 
 you> /model
-you> {'llm': {'base_url': 'http://localhost:11434/v1', 'model': 'qwen3:8b', 'api_key_set': True, 'timeout': 120.0}}
+you> {
+  "llm": {
+    "base_url": "http://localhost:11434/v1",
+    "model": "qwen3:8b",
+    "api_key_set": true,
+    "timeout": 120.0
+  }
+}
 ```
 
 ## Using the backend directly

@@ -481,13 +481,13 @@ for the session / agent — not by writing these):
 | `agent.history`       | the stored message list (every turn so far) |
 | `agent.context`       | the full `RunContext` (run-scoped fields + the per-request fields of the last `chat()`) |
 
-### The three categories of a `RunContext`
+### The three lifetimes inside a `RunContext`
 
 This is the most important part of the model. A `RunContext` falls into
-**three groups**, and the core treats each differently (the same split
+**three lifetimes**, and the core treats each differently (the same split
 `hooks.py`'s docstring uses — see `agent_seed/hooks.py`):
 
-| | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          | **working state** (set by the core / a tool call or turn) |
+| | **run-scoped** (stable across turns)   | **per-request** (rebuilt each LLM call)          | **per-call / per-turn** (set by the core for one tool call or one turn) |
 |---|----------------------------------------|--------------------------------------------------|------------------------------------------------------------|
   | fields | `run_id`, `session_id`, `agent_name`, `base_prompt`, `system_prompt`, `allowed_tools`, `base_model`, `current_model`, `turn`, `usage`, `extras` | `messages`, `tools`, `tool_loop_round`, `context`, `examples`, `addendum` | `tool_call`, `tool_result`, `final_answer`, `turn_usage` |
  | core behavior | seeds once at establishment / keeps the hook's writes | rebuilds at the start of every round | `tool_call`/`tool_result` are set for one tool call; `final_answer` and `turn_usage` are set once per turn in `_finish_turn` |
@@ -996,6 +996,10 @@ round). To narrow *this round only*, edit `ctx.tools` directly in
 does not carry to the next round.
 
 **Declarative example** (`hook_modules/<agent>/tools.py`):
+
+> New here and want a copy-paste version (no-coder)? See the step-by-step
+> walk-through [`howto-craft-an-agent.md` → Step 2](howto-craft-an-agent.md#step-2--turn-on-a-tool-optional);
+> this section is the reference behind it.
 
 ```python
 from agent_seed.hooks import Hooks, RunContext
@@ -1540,6 +1544,25 @@ session-scoped: `current_model` is sticky across `set_agent_name` and
 `ctx.current_model = ctx.base_model` itself. Use `Agent.test_model(cfg)` to
 probe a candidate without committing (it is a diagnostic, not a change).
 See "Model selection (dynamic, sticky)" and `protocol.md` (`POST /config`).
+
+**Q: In the REPL, what do `/model`, `/model test`, and `/model force` do — and
+why does wrapping a name in quotes work?**
+A:
+- `/model` — show this session's effective LLM config (`GET /config`).
+- `/model <name>` — **probe then commit**: the backend pings the candidate
+  (`POST /config/test`) and only switches (`POST /config`) if the probe
+  succeeds; on failure the current model is kept. Use this normally.
+- `/model test <name>` — probe only, never switch.
+- `/model force <name>` — switch **without** probing (use when the probe can't
+  reach the endpoint you *do* want to use).
+- The REPL peels **one layer of matching surrounding quotes** from the name (and
+  optional base URL) before sending — so `/model "qwen3.8:27b"` is sent as
+  `qwen3.8:27b`. It keeps unbalanced or internal quotes as typed
+  (`frontends/repl/app.py::unquote`).
+
+After each turn the REPL prints a compact usage line — `in=N out=M total=T` —
+formatted from the `done` event's `usage`; `/usage` shows the session cumulative
+total (`frontends/repl/app.py::format_tokens`).
 
 ---
 

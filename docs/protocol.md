@@ -111,6 +111,11 @@ go through `on_model_change` (a probe failing is a finding, not a change — use
 { "ok": false, "error": "connection refused", "latency_ms": 12.0, "usage": null, "model": "candidate-model" }
 ```
 
+`400` — the backend has no base LLM to merge over (e.g. `LLM_MODEL` unset, no
+pending/app config, and the body doesn't supply enough of
+`base_url` / `api_key` / `model`). The backend does **not** fabricate a default
+to probe — a client error is returned instead.
+
 ## `GET /tools`
 
 `200`
