@@ -14,6 +14,8 @@ from prompt_toolkit.history import FileHistory
 from rich.console import Console
 from rich.panel import Panel
 
+from ...core import is_number
+
 CONSOLE = Console()
 
 
@@ -202,21 +204,23 @@ def render_tool_event(console: Console, name: str, arguments: Any, result: Any) 
     console.print(f"[bold cyan]⚙ {name}[/] [dim]({args})[/] [green]→[/] [magenta]{result}[/]")
 
 
-def _is_num(v: Any) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
 def format_tokens(usage: dict[str, Any] | None) -> str:
-    """A compact ``in=N out=M (total=T)`` string for a usage dict, or a dash."""
+    """A compact ``in=N out=M total=T`` string for a usage dict, or a dash.
+
+    ``T`` is taken from ``total_tokens`` if present, otherwise derived as
+    ``prompt_tokens + completion_tokens`` if both are present. A truthy non-empty
+    dict with non-numeric values is rendered with ``str(usage)`` as a last
+    resort; empty/None renders as ``—``.
+    """
     if not usage:
         return "—"
     parts: list[str] = []
     for key, label in (("prompt_tokens", "in"), ("completion_tokens", "out")):
-        if _is_num(usage.get(key)):
+        if is_number(usage.get(key)):
             parts.append(f"{label}={int(usage[key])}")
-    if _is_num(usage.get("total_tokens")):
+    if is_number(usage.get("total_tokens")):
         parts.append(f"total={int(usage['total_tokens'])}")
-    elif all(_is_num(usage.get(k)) for k in ("prompt_tokens", "completion_tokens")):
+    elif all(is_number(usage.get(k)) for k in ("prompt_tokens", "completion_tokens")):
         parts.append(f"total={int(usage['prompt_tokens']) + int(usage['completion_tokens'])}")
     return " ".join(parts) if parts else f"{usage}"
 

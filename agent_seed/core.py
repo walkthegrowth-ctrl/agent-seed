@@ -25,7 +25,7 @@ from typing import Any
 from .discovery import get_hooks_for_agent
 from .hooks import Hooks, RunContext
 from .llm import LLMConfig, LLMProbe, OpenAICompatClient
-from .prompting import compose_prompt, compose_system
+from .prompting import compose_prompt, compose_system, normalize_examples
 from .tools import ToolError, ToolRegistry
 from .tools import registry as default_registry
 
@@ -43,7 +43,13 @@ def _elapsed_ms(start: float) -> float:
     return round((time.monotonic() - start) * 1000.0, 1)
 
 
-def _is_number(value: Any) -> bool:
+def is_number(value: Any) -> bool:
+    """True for a real numeric type (int/float), excluding bool.
+
+    Shared helper: numeric usage counters must be distinguishable from truthy
+    non-numbers (a bare ``True`` is not a token count). Imported by the backend
+    (session usage) and the REPL (usage rendering).
+    """
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
@@ -57,7 +63,7 @@ def _sum_usage(total: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     out = dict(total)
     for key, value in delta.items():
         prev = out.get(key)
-        if _is_number(value) and _is_number(prev):
+        if is_number(value) and is_number(prev):
             out[key] = prev + value
         else:
             out[key] = value
@@ -68,7 +74,7 @@ def _usage_delta(current: dict[str, Any], snapshot: dict[str, Any]) -> dict[str,
     """Per-turn usage = the numeric counters that advanced since ``snapshot``."""
     out: dict[str, Any] = {}
     for key in set(current) | set(snapshot):
-        if _is_number(current.get(key)) or _is_number(snapshot.get(key)):
+        if is_number(current.get(key)) or is_number(snapshot.get(key)):
             out[key] = (current.get(key) or 0) - (snapshot.get(key) or 0)
         elif key in current:
             out[key] = current[key]
@@ -397,7 +403,7 @@ class Agent:
             # every round so a hook's one-round tweak never carries forward,
             # then before_llm may adjust them (docs/manual.md "Prompting").
             ctx.context = self.hooks.context
-            ctx.examples = list(self.hooks.examples) if self.hooks.examples else None
+            ctx.examples = normalize_examples(self.hooks.examples)
             ctx.addendum = None
             # Per-request working state, rebuilt from the current session
             # history. compose_prompt renders system (identity + context +

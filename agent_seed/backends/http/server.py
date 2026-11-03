@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from ... import __version__
-from ...core import DEFAULT_SYSTEM_PROMPT, Agent, _is_number
+from ...core import DEFAULT_SYSTEM_PROMPT, Agent, is_number
 from ...discovery import get_hooks_for_agent, list_agents
 from ...hooks import Hooks, RunContext
 from ...llm import LLMConfig, LLMConfigError, OpenAICompatClient
@@ -158,7 +158,7 @@ class SessionStore:
         total = dict(self._session_usage.get(session_id, {}))
         for key, value in turn_usage.items():
             prev = total.get(key)
-            if _is_number(value) and _is_number(prev):
+            if is_number(value) and is_number(prev):
                 total[key] = prev + value
             else:
                 total[key] = value
@@ -288,8 +288,21 @@ def create_app(
                     base = sessions.pending(body.session_id) or sessions.default_llm()
             else:
                 base = sessions.default_llm()
-        except LLMConfigError:
-            base = LLMConfig(base_url="http://localhost:11434/v1", api_key="unused", model="probe")
+        except LLMConfigError as exc:
+            # No base to merge over (e.g. LLM_MODEL unset and no pending/app
+            # config). Do not silently probe a fabricated default that would
+            # report a bogus model / false success — a client error instead.
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": (
+                        f"no base LLM config to probe against ({exc}); "
+                        "set the app default (POST /config) or supply "
+                        "base_url + api_key + model in the body"
+                    ),
+                },
+                status_code=400,
+            )
         try:
             candidate = base.with_updates(
                 base_url=body.base_url,
