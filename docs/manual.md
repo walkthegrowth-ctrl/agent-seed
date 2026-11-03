@@ -48,6 +48,7 @@ Companion documents:
     - [The contract: `make()`](#the-contract-make)
     - [Merge policies](#merge-policies)
     - [Overriding discovery](#overriding-discovery)
+    - [Durable memory (a promoted experiment)](#durable-memory-a-promoted-experiment)
   - [Agents: hook subdirectories](#agents-hook-subdirectories)
     - [Your first agent (end to end)](#your-first-agent-end-to-end)
     - [Per-agent tool access (strict whitelist)](#per-agent-tool-access-strict-whitelist)
@@ -816,6 +817,68 @@ current working directory. In your own test suites, point
 `agent_seed.discovery.DEFAULT_HOOKS_FOLDER` at an empty directory (see the
 autouse fixture in this repo's `tests/conftest.py`) so a real
 `hook_modules/` can never feed your tests.
+
+### Durable memory (a promoted experiment)
+
+`experiments/memory.py` is a worked example of a richer promoted experiment —
+one that is *stateful* (it keeps a durable store) and *tool-adding*. It gives an
+agent memory that survives `Agent.reset()` and a process restart, and wires it
+entirely through the hook surface (no core changes, standard library only).
+Read its module docstring (`experiments/memory.py`) for the full reference;
+this is the user-facing sketch.
+
+**What it does**
+
+- **Auto-restore.** When a session (re)starts, the session's rolling *summary*
+  is folded into the single system message (the `ctx.context` channel) for every
+  round of every turn, so the agent picks up where it left off.
+- **Queryable transcript.** It registers a `memory_recall(query, session_id,
+  limit)` tool so the agent can keyword/phrase-search the stored turns across
+  sessions (SQLite FTS5, with a `LIKE` fallback where FTS5 is unavailable).
+- **Rolling summary.** One extra LLM call per committed turn folds the previous
+  summary plus the new turn(s) into an updated summary (gated by a per-session
+  watermark, fail-soft: an LLM outage never breaks the user's turn). This is the
+  "combine previous + current conversation" behaviour.
+
+**Activation (plain copy + one whitelist line)**
+
+```bash
+cp experiments/memory.py hook_modules/        # main (root) agent
+# then add the tool to the agent's whitelist (one line):
+#   hook_modules/00_tools.py  ->  ALLOWED_TOOLS = ["calculator", "memory_recall"]
+```
+
+A named agent is the same: `cp experiments/memory.py hook_modules/<name>/` and
+declare the tool in that folder (see the tool-whitelist section). Deactivation
+is `rm hook_modules/memory.py` (drop the tool name to fully remove the tool).
+
+**Activation model it demonstrates**
+
+- **Per-agent, replace semantics preserved.** Memory is scoped to the agent
+  folder it is copied into. It deliberately defines *no* `enter_agent`, so it
+  never reaches into another module's hook slots — the strict whitelist remains
+  the single gate that decides an agent's tools. Registration alone never grants
+  access; the agent must whitelist `memory_recall`.
+- **Merge-collision warning.** It defines `before_llm`, `after_tool_call`,
+  `ready_session`, and `finish`. If the target folder also sets one of those
+  slots, "alphabetically last wins" — name this file `zz_memory.py` to make it
+  the survivor, or consolidate.
+
+**Store & knobs**
+
+- Store: SQLite at `./agent_memory/<agent>.db` (one file per agent), overridden
+  by `$MEMORY_ROOT`. One row per committed turn; a per-session rolling summary
+  with a `last_seq` watermark.
+- `MEMORY_SUMMARY_WHEN` (`finish` default · `ready` · `both`),
+  `MEMORY_SUMMARY_MODEL` (point the fold at a cheaper model),
+  `MEMORY_MAX_SUMMARY_CHARS` (cap the previous summary folded in).
+- **`POST /reset` does not clear memory** (that is the point); delete the `.db`
+  to wipe an agent's memory.
+
+**Retrieval roadmap.** v0 retrieval is FTS5 keyword/phrase search — dependency-
+free. Semantic (embedding/vector) retrieval is the intended follow-on: the
+`memory_recall` signature is stable, so the search backend can be swapped without
+touching the hooks.
 
 ### Agents: hook subdirectories
 
