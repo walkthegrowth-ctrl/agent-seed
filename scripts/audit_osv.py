@@ -29,9 +29,7 @@ def load_locked_packages(lock_path: str) -> list[tuple[str, str]]:
 def query_osv(pkg: str, ver: str, timeout: int = 30) -> list[dict]:
     if not ver:
         return []
-    payload = json.dumps(
-        {"package": {"name": pkg, "ecosystem": "PyPI"}, "version": ver}
-    ).encode()
+    payload = json.dumps({"package": {"name": pkg, "ecosystem": "PyPI"}, "version": ver}).encode()
     req = urllib.request.Request(
         OSV_API, data=payload, headers={"Content-Type": "application/json"}
     )
@@ -68,10 +66,7 @@ def main() -> int:
         )
         return 1
 
-    print(
-        f"OK: {len(pkgs)} locked packages, "
-        "no known vulnerabilities in the resolved versions"
-    )
+    print(f"OK: {len(pkgs)} locked packages, no known vulnerabilities in the resolved versions")
     return 0
 
 

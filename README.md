@@ -121,6 +121,7 @@ agent_seed/
   discovery.py            auto-loads promoted hooks from hook_modules/ (+ agent subdirs)
   llm.py                  OpenAI-compatible streaming client (httpx2)
   tools.py                @tool registry, JSON-schema gen, calculator
+  prompting.py            compose identity/context/examples/addendum into a round
   backends/
     http/
       server.py           FastAPI app + SSE + sessions
@@ -134,8 +135,8 @@ hook_modules/           promoted hook modules (the default agent); subdirs are a
 docs/
   architecture.md         layers, data flow, design decisions
   protocol.md             HTTP/SSE wire contract for frontends
-   manual.md               user manual: adding tools + writing/promoting hooks
-   howto-craft-an-agent.md no-code walk-through: make your own agent in minutes
+  manual.md               user manual: adding tools + writing/promoting hooks
+  howto-craft-an-agent.md no-code walk-through: make your own agent in minutes
 tests/
   conftest.py             FakeLLMClient + script helpers
   test_calculator.py
@@ -146,10 +147,10 @@ tests/
   test_backend.py         real FastAPI app end-to-end (mocked LLM)
   test_model_selection.py runtime model selection (set_model / on_model_change / test_model)
   test_repl.py            REPL: SSE parse, Session client, /model & /model force & /model test
-   test_repl_loop.py       REPL: command loop + slash commands
-   test_e2e_repl.py        end-to-end: real backend+REPL vs a scripted in-loop LLM (pty, no network)
-   test_e2e_real.py        end-to-end smoke vs a real LLM (auto-skips if none reachable)
-   e2e/                    e2e support: scripted LLM server (ThreadingHTTPServer) + pty REPL driver
+  test_repl_loop.py       REPL: command loop + slash commands
+  test_e2e_repl.py        end-to-end: real backend+REPL vs a scripted in-loop LLM (pty, no network)
+  test_e2e_real.py        end-to-end smoke vs a real LLM (auto-skips if none reachable)
+  e2e/                    e2e support: scripted LLM server (ThreadingHTTPServer) + pty REPL driver
 ```
 
 ## Design notes
