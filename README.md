@@ -81,6 +81,15 @@ uv run agent-repl                 # defaults to http://127.0.0.1:8787
 # uv run agent-repl --url http://other-host:8787
 ```
 
+You can also **compose a new agent** (a `hook_modules/<name>/` folder with voice,
+tools, context, examples, and a sign-off) without touching Python:
+
+```bash
+uv run agent-compose tutor --voice "You are a patient math tutor." --tools calculator
+```
+
+See `docs/howto-craft-an-agent.md` for the step-by-step walk-through.
+
 REPL commands: `/help`, `/reset` (clear server-side session), `/tools`,
 `/usage` (session token usage), `/agent [name]` / `/agents` (switch / list
 agents), `/model` (backend LLM config), `/quit` (or `/exit`). Type `/` alone to
@@ -122,6 +131,8 @@ agent_seed/
   llm.py                  OpenAI-compatible streaming client (httpx2)
   tools.py                @tool registry, JSON-schema gen, calculator
   prompting.py            compose identity/context/examples/addendum into a round
+  composer/               `agent compose`: generator + tool reservoir catalog + CLI
+    cli.py                `agent-compose` entry point (creates an agent folder)
   backends/
     http/
       server.py           FastAPI app + SSE + sessions
@@ -132,6 +143,9 @@ agent_seed/
       cli.py              `agent-repl` entry point
 experiments/            prototype hook modules (e.g. ahem.py); never auto-loaded
 hook_modules/           promoted hook modules (the default agent); subdirs are agents
+tools/                  ready-made tool "reservoir" (`agent compose --tools` picks from here)
+  date.py               sample tool: current_date
+  random_int.py         sample tool: random_int
 docs/
   architecture.md         layers, data flow, design decisions
   protocol.md             HTTP/SSE wire contract for frontends
@@ -150,6 +164,9 @@ tests/
   test_repl_loop.py       REPL: command loop + slash commands
   test_e2e_repl.py        end-to-end: real backend+REPL vs a scripted in-loop LLM (pty, no network)
   test_e2e_real.py        end-to-end smoke vs a real LLM (auto-skips if none reachable)
+  test_composer_generator.py  pure generator (name, channels, write_plan, --force)
+  test_composer_catalog.py    tool catalog: built-ins + tools/ reservoir (ast scan)
+  test_composer_e2e.py        a composed agent folder is discoverable + its tool callable
   e2e/                    e2e support: scripted LLM server (ThreadingHTTPServer) + pty REPL driver
 ```
 
@@ -168,7 +185,9 @@ tests/
 - **Agents.** `hook_modules/<name>/` is an alternate hook set selected by
   `agent_name` (`Agent(agent_name=...)`, `POST /chat`, REPL `/agent`); the root
   folder is the default agent (see `docs/manual.md`, and the no-code walk-through
-  `docs/howto-craft-an-agent.md`).
+  `docs/howto-craft-an-agent.md`). `agent compose` creates such a folder (voice,
+  tools, context, examples, sign-off) in one step — see `docs/manual.md`,
+  "Composing an agent".
 - **`LLM_MODEL` is required.** The backend returns HTTP 500 if it is unset.
 
 ## License

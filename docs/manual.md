@@ -53,6 +53,11 @@ Companion documents:
     - [Your first agent (end to end)](#your-first-agent-end-to-end)
     - [Per-agent tool access (strict whitelist)](#per-agent-tool-access-strict-whitelist)
     - [The agent-identity boundary (enter / exit)](#the-agent-identity-boundary-enter--exit)
+  - [Composing an agent (`agent compose`)](#composing-an-agent-agent-compose)
+    - [What it creates](#what-it-creates)
+    - [The tool reservoir](#the-tool-reservoir)
+    - [Flags](#flags)
+    - [Removing a composed agent](#removing-a-composed-agent)
   - [Which hook to use, by goal](#which-hook-to-use-by-goal)
   - [Worked examples](#worked-examples)
   - [Testing hooks](#testing-hooks)
@@ -1082,6 +1087,100 @@ the agent you're taking over needs. Selecting an agent (via
 `set_agent_name(...)`, `POST /chat`'s `agent_name`, or `/agent`) re-resolves
 `Agent.hooks` (an explicit `Hooks(...)` from construction always wins) and
 re-fires establishment on the next `chat()`, mirroring `set_session`.
+
+### Composing an agent (`agent compose`)
+
+The fastest way to make an agent: one command, no code, no restart required to
+*create* it (you do restart the backend if it is already running — hooks load once
+per process). `agent compose NAME` produces a self-contained
+`hook_modules/NAME/` folder that the runtime discovers the same way it discovers a
+hand-written one (replace semantics, strict tool-whitelist). See
+[`howto-craft-an-agent`](howto-craft-an-agent.md) for the step-by-step version.
+
+```console
+$ uv run agent-compose tutor \
+    --voice "You are a patient, encouraging math tutor." \
+    --tools calculator
+Created 2 file(s) in hook_modules/tutor/:
+  hook_modules/tutor/prompt.md
+  hook_modules/tutor/tools.py
+Next steps:
+  1. Restart the backend if it is running (hooks load once per process).
+  2. Call it:  /agent tutor  (REPL), or  POST /chat  {"agent_name": "tutor"}
+To remove this agent:  rm -rf hook_modules/tutor
+```
+
+#### What it creates
+
+| file | generated when | content |
+|---|---|---|
+| `prompt.md`     | `--voice` set        | your persona (the agent's identity) |
+| `tools.py`      | `--tools a,b` set    | whitelist (+ inline & register reservoir tools) |
+| `context.md`    | `--context` set      | per-round context baseline |
+| `examples.jsonl`| `--example` set      | few-shot demonstrations (one `<role>=<contents>` pair per `--example`) |
+| `sign.py`       | `--signoff` set      | a `finish` hook that appends your line to every answer |
+
+A channel you don't pass does not become a file — the agent is exactly as big as
+you asked for. If you pass only a name, an empty `prompt.md` (or nothing at all)
+is still a legal agent folder; you can fill it in later.
+
+#### The tool reservoir
+
+`--tools NAME` picks from the **tool reservoir**:
+
+1. the default registry (ships `calculator`), and
+2. any `.py` file in the `tools/` folder at the project root (override with
+   `$TOOLS_ROOT`) — each file may define one or more *self-contained* plain
+   functions.
+
+Reservoir files are scanned with `ast` (never imported at scan time) and only the
+tool functions' source plus their top-level imports are captured. When `agent
+compose` chooses a reservoir tool it **inlines** it (that source + those imports)
+into the generated `tools.py`, which also adds the name to `ALLOWED_TOOLS` and
+registers it in `make()` (idempotent `has()` guard). The result is a *self-contained*
+agent folder: it does not depend on the CWD or on the reservoir staying present —
+"delete the folder" still deletes the agent. Built-in tools (already in the runtime
+registry) are never inlined, only whitelisted.
+
+A reservoir file is just a plain Python function with a one-line docstring and
+typed parameters, self-contained (no sibling helpers):
+
+```python
+# tools/dice.py
+import random
+
+
+def roll_dice(sides: int) -> int:
+    """Roll a uniform integer in [1, sides] (inclusive)."""
+    return random.randint(1, sides)
+```
+
+```console
+$ uv run agent-compose casino --tools "calculator,roll_dice"
+```
+
+#### Flags
+
+| flag | meaning |
+|---|---|
+| `NAME`            | the agent's folder name (required; `[a-z0-9_-]+`, no dots or slashes). |
+| `--voice`         | the agent's persona (its `prompt.md`). |
+| `--tools a,b`     | comma-separated tools to whitelist (repeatable with `--tools`). |
+| `--context`       | per-round context baseline (its `context.md`). |
+| `--example R=C`   | one few-shot pair; repeatable (its `examples.jsonl`). |
+| `--signoff TEXT`  | a line appended to every answer (its `sign.py`). |
+| `--root HOOKS_ROOT` | where the agent folder is created (default: `$HOOKS_ROOT` or `hook_modules`). |
+| `--dry-run`, `-n` | print the generated files; write nothing. |
+| `--force`, `-f`   | overwrite an existing agent folder. |
+| `--list-tools`    | list the available tools and exit. |
+
+In an interactive terminal (no flags) `agent compose` prompts you, one short
+question per channel; pass flags for scripting.
+
+#### Removing a composed agent
+
+`rm -rf hook_modules/tutor` — no cleanup anywhere else. The same applies to
+hand-written agents; "delete the folder, delete the agent" is the whole rule.
 
 ### Which hook to use, by goal
 

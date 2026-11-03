@@ -23,6 +23,7 @@ dev = [
 [project.scripts]
 agent-seed = "agent_seed.backends.http.cli:serve"
 agent-repl = "agent_seed.frontends.repl.cli:main"
+agent-compose = "agent_seed.composer.cli:main"
 
 [build-system]
 requires = ["hatchling"]

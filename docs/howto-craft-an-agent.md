@@ -28,6 +28,11 @@ dropping a few short files into it*. There is nothing to register, compile, or
 configure. Deleting the folder deletes the agent. That's the whole system, from
 your side.
 
+> **Prefer to make it with one command instead of copy-pasting?** Skip straight
+> to `agent compose NAME --voice "..." --tools calculator` — it builds the same
+> folder for you. See `docs/manual.md`, "Composing an agent", for the full
+> reference (voice, tools, context, examples, sign-off, `--dry-run`, `--force`).
+
 > We'll build one agent together, named **`tutor`**, that explains things like a
 > patient math teacher. Replace the words where you want your own personality.
 
