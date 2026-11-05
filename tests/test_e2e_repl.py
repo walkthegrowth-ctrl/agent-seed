@@ -282,6 +282,160 @@ def test_unknown_command_keeps_repl_alive(repl: ReplDriver) -> None:
     assert "alpha" in out, out[:1200]
 
 
+# ---------------------------------------------------------------------------
+# Per-command battery: every standard REPL command, driven in a *real*
+# interactive session (no monkeypatching of the command logic). The key
+# property these assert on top of "the right text": a command must *never*
+# take the REPL down. Because the pty driver settles on a *dead* process too,
+# a mid-turn exception would otherwise be invisible — so each test also guards
+# that no Python traceback leaked and the REPL is still alive afterwards.
+# ---------------------------------------------------------------------------
+
+
+def _assert_repl_alive(repl: ReplDriver, out: str) -> None:
+    """A command must not crash the REPL with a Python traceback / markup error."""
+    assert "Traceback" not in out, f"traceback leaked into the REPL:\n{out[:1200]}"
+    assert "MarkupError" not in out, "Rich markup error leaked into the REPL:\n" + out[:1200]
+    assert repl.proc.poll() is None, (
+        "the REPL process exited; a command crashed it:\n" + out[:1200]
+    )
+
+
+def test_usage_renders_the_session_total_without_crashing(
+    fake_server: FakeLLMServer, repl: ReplDriver
+) -> None:
+    """Regression: the /usage output used to contain a ``[/reset]`` substring
+    that Rich parsed as a closing tag, raising MarkupError and killing the REPL
+    *after* printing the correct session line. We now assert on the line Rich
+    chokes on, not just the one it prints before it."""
+    fake_server.reset(text("hello"))
+    repl.send("hi")
+    out = repl.send("/usage")
+    assert "session:" in out and "in=1" in out, (
+        "/usage must render the session cumulative total:\n" + out[:1200]
+    )
+    # ...and it must not die the instant it prints that line.
+    _assert_repl_alive(repl, out)
+
+
+def test_usage_before_any_turn_shows_empty_hint(repl: ReplDriver) -> None:
+    out = repl.send("/usage")
+    assert "no usage recorded" in out, out[:1200]
+    _assert_repl_alive(repl, out)
+
+
+def test_model_probe_then_set_uses_new_model(fake_server: FakeLLMServer, repl: ReplDriver) -> None:
+    """``/model <n>`` (the plain form) probes first and *commits* on success; the
+    next chat must run against the new model. (The committed-on-probe path was
+    uncovered — only ``force`` was.)"""
+    fake_server.reset(text("probe pong"), text("running with the new model"))
+    first = repl.send(f"/model {GOOD_MODEL}")
+    assert f"model: {GOOD_MODEL}" in first, (
+        "a successful probe should commit and report the effective model:\n" + first[:1200]
+    )
+    second = repl.send("hello on the new model")
+    assert "running with the new model" in second, second[:1200]
+    request = _last_chat_request(fake_server)
+    assert request.get("model") == GOOD_MODEL, (
+        f"the next chat must use the committed model, got {request.get('model')}"
+    )
+
+
+def test_model_plain_probe_failure_aborts_keeps_current(
+    fake_server: FakeLLMServer, repl: ReplDriver
+) -> None:
+    """A failed probe on the plain ``/model <n>`` form must abort WITHOUT
+    committing the bad model — the current model is left in place."""
+    fake_server.reset(fail(), text("still on the old model"))
+    out = repl.send(f"/model {BAD_MODEL}")
+    assert "not set:" in out, "a failed probe must abort the commit:\n" + out[:1200]
+    assert BAD_MODEL in out, out[:1200]
+    _assert_repl_alive(repl, out)
+    # The old model still answers — the failed candidate was never committed.
+    again = repl.send("still on the old model")
+    assert "still on the old model" in again, again[:1200]
+
+
+def test_model_test_missing_name_shows_usage_hint(repl: ReplDriver) -> None:
+    out = repl.send("/model test")
+    assert "usage:" in out, "/model test with no name must show its usage hint:\n" + out[:1200]
+    assert "/model test" in out, out[:1200]
+    _assert_repl_alive(repl, out)
+
+
+def test_model_force_missing_name_shows_usage_hint(repl: ReplDriver) -> None:
+    out = repl.send("/model force")
+    assert "usage:" in out, "/model force with no name must show its usage hint:\n" + out[:1200]
+    assert "/model force" in out, out[:1200]
+    _assert_repl_alive(repl, out)
+
+
+def test_agent_no_arg_reports_the_main_agent(repl: ReplDriver) -> None:
+    out = repl.send("/agent")
+    assert "agent:" in out and "(default)" in out, (
+        "/agent with no arg must show the current (main) agent:\n" + out[:1200]
+    )
+    _assert_repl_alive(repl, out)
+
+
+def test_exit_is_an_alias_for_quit(repl: ReplDriver, backend: dict[str, Any]) -> None:
+    out = repl.send("/exit")
+    assert "bye" in out.lower(), out[:1200]
+    with httpx2.Client(timeout=5) as client:
+        assert client.get(f"{backend['url']}/health").status_code == 200
+
+
+def test_blank_input_is_a_noop_and_repl_stays_alive(repl: ReplDriver) -> None:
+    out = repl.send("")
+    assert "agent>" not in out, "an empty line must not chat:\n" + out[:1200]
+    assert "you>" in out, "an empty line must re-prompt:\n" + out[:1200]
+    _assert_repl_alive(repl, out)
+    # And still fully functional.
+    out = repl.send("/agents")
+    assert "agents:" in out, out[:1200]
+
+
+def test_block_mode_keeps_blank_lines(fake_server: FakeLLMServer, repl: ReplDriver) -> None:
+    """A multi-line block keeps interior blank lines (help: "blank lines are kept")."""
+    fake_server.reset(text("joined fine"))
+    out = repl.send_block(["line one", "", "line three"])
+    assert "joined fine" in out, out[:1200]
+    request = _last_chat_request(fake_server)
+    user_messages = [m for m in request["messages"] if m.get("role") == "user"]
+    assert user_messages[-1]["content"] == "line one\n\nline three", user_messages[-1]
+
+
+def test_block_mode_slash_lines_are_plain_text(
+    fake_server: FakeLLMServer, repl: ReplDriver
+) -> None:
+    """Inside a block, a line that *looks* like a command (``/reset``) is literal
+    text sent to the LLM — it must NOT be executed."""
+    fake_server.reset(text("echoed the slash as text"))
+    out = repl.send_block(["/reset", "hello there"])
+    assert "echoed the slash as text" in out, (
+        "the block must be sent as a chat, not executed as commands:\n" + out[:1200]
+    )
+    assert "session reset" not in out.lower(), (
+        "/reset inside a block must not have been executed:\n" + out[:1200]
+    )
+
+
+def test_block_mode_ctrl_c_cancels_the_draft(repl: ReplDriver) -> None:
+    """Ctrl-C in block mode discards the draft and returns to normal mode."""
+    # Open the block; the prompt is now "…>" (not "you>"), so settle on that marker.
+    repl._send_marked("/", "...>", settle=1.2, timeout=30)
+    repl._send_marked("some draft", "...>", settle=1.2, timeout=30)
+    # A raw Ctrl-C (\x03 -> SIGINT) cancels the draft and the REPL returns to
+    # normal mode, re-prompting "you> " — which is exactly where send_raw settles.
+    out = repl.send_raw(b"\x03", settle=1.2, timeout=30, what="Ctrl-C in block mode")
+    assert "draft discarded" in out.lower(), (
+        "Ctrl-C in block mode must report the discarded draft:\n" + out[:1200]
+    )
+    # Back in normal mode: a real command still works and nothing was sent.
+    out = repl.send("/agents")
+    assert "agents:" in out, out[:1200]
+
+
 def test_quit_exits_cleanly(repl: ReplDriver, backend: dict[str, Any]) -> None:
     out = repl.send("/quit")
     assert "bye" in out.lower(), out[:1200]

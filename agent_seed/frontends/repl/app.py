@@ -410,7 +410,7 @@ class Repl:
                 CONSOLE.print("[dim]no usage recorded yet (no turns, or backend sent none)[/]")
             else:
                 CONSOLE.print(f"[bold]session:[/] {format_tokens(total)}")
-            CONSOLE.print("[dim]session total resets with the history ([/reset])[/]")
+            CONSOLE.print("[dim]session total resets with the history (use /reset)[/]")
             return True
         if cmd == "/tools":
             names = session.tools_names()
@@ -426,12 +426,12 @@ class Repl:
                     CONSOLE.print(json.dumps({"llm": config.get("llm")}, indent=2, default=str))
             elif parts[1] == "test":
                 if len(parts) < 3:
-                    CONSOLE.print("[red]usage:[/] /model test <name> [base_url]")
+                    CONSOLE.print("[red]usage:[/] /model test <name> (optional base_url)")
                     return True
                 self._model_probe(session, parts[2], parts[3] if len(parts) > 3 else None)
             elif parts[1] == "force":
                 if len(parts) < 3:
-                    CONSOLE.print("[red]usage:[/] /model force <name> [base_url]")
+                    CONSOLE.print("[red]usage:[/] /model force <name> (optional base_url)")
                     return True
                 self._model_set(
                     session, parts[2], parts[3] if len(parts) > 3 else None, probe=False
@@ -439,7 +439,7 @@ class Repl:
             else:
                 if len(parts) < 2:
                     CONSOLE.print(
-                        "[red]usage:[/] /model <name> [base_url]  "
+                        "[red]usage:[/] /model <name> (optional base_url)  "
                         "(or /model test <name>, /model force <name>)"
                     )
                     return True

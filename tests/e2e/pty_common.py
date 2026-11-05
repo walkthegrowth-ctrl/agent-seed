@@ -298,6 +298,19 @@ class PtySession:
             marker, settle=settle, timeout=timeout, what=what or f"turn for {line!r}"
         )
 
+    def send_raw(
+        self, data: bytes, settle: float = 1.2, timeout: float = 30.0, what: str = "raw input"
+    ) -> str:
+        """Write raw bytes to the pty master (no newline appended) and settle
+        on the session's default marker.
+
+        Used for control keys that are not a "line" — most importantly Ctrl-C
+        (``b"\\x03"``), which the terminal's line discipline turns into SIGINT.
+        """
+        self._take()
+        os.write(self.master, data)
+        return self.read_until(self.MARKER, settle=settle, timeout=timeout, what=what)
+
     # -- teardown -----------------------------------------------------------
 
     def close(self, timeout: float = 15.0) -> int:
