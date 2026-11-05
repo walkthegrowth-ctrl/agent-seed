@@ -19,6 +19,8 @@ from .generator import ComposerError, Plan, Spec, generate, validate_name, write
 
 DEFAULT_ROOT = os.environ.get("HOOKS_ROOT") or "hook_modules"
 
+_VALID_ROLES = ("user", "assistant", "system", "tool")
+
 
 def _is_interactive() -> bool:
     try:
@@ -27,16 +29,69 @@ def _is_interactive() -> bool:
         return False
 
 
-def _parse_examples(raw: list[str]) -> list[dict[str, str]]:
-    """`--example ROLE=CONTENT` (repeatable) -> role/content message list."""
+def unquote_once(s: str) -> str:
+    """Strip whitespace; if the result begins and ends with the same quote, drop one outer pair.
+
+    - ``'x'`` -> ``x``
+    - ``"x"`` -> ``x``
+    - ``x`` -> ``x`` (unchanged)
+    - ``He said "x"`` -> ``He said "x"`` (outer chars differ; inner ``'x'`` stays)
+    - ``'  padded  '`` -> ``padded`` (unquote, then strip)
+    - ``'x`` (unbalanced) -> ``'x`` (unchanged)
+    """
+    s = s.strip()
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1].strip()
+    return s
+
+
+def parse_tools(raw: str) -> list[str]:
+    """Parse a comma-separated tools string.
+
+    Trim each token, drop empty ones, de-dup preserving first occurrence.
+    Empty / whitespace-only input -> ``[]``.
+    """
+    out: list[str] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if token and token not in out:
+            out.append(token)
+    return out
+
+
+def resolve_tools(tools: list[str], available: list[Tool]) -> list[str]:
+    """Check that every requested tool name exists in the catalog.
+
+    Shared by the flag path and the wizard so an unknown tool is a clean
+    ``error:`` message at either entry point (not a Python traceback, and not
+    a silent "empty agents" surprise). Raises :class:`ComposerError`.
+    """
+    have_names = {t.name for t in available}
+    have_hint = ", ".join(t.name for t in available) or "(none)"
+    unknown = [n for n in tools if n not in have_names]
+    if unknown:
+        raise ComposerError(
+            f"tool(s) not found in the catalog: {', '.join(unknown)}. Available: {have_hint}"
+        )
+    return list(tools)
+
+
+def parse_examples_pairs(items: list[str]) -> list[dict[str, str]]:
+    """Validate and normalise ``ROLE=CONTENT`` items into a message list.
+
+    Shared by the ``--example`` flag and the interactive wizard so both
+    entry points reject the same things. Each item must partition on its
+    first ``=`` into a non-empty, well-known role (``user``/``assistant``/
+    ``system``/``tool``); the content may be empty.
+    """
     out: list[dict[str, str]] = []
-    for item in raw or []:
+    for item in items:
         role, sep, content = item.partition("=")
         if not sep:
-            raise ComposerError(f"--example expects ROLE=CONTENT, got {item!r}")
+            raise ComposerError(f"example expects ROLE=CONTENT, got {item!r}")
         role = role.strip()
-        if role not in ("user", "assistant", "system", "tool"):
-            raise ComposerError(f"--example role {role!r} must be user/assistant/system/tool")
+        if role not in _VALID_ROLES:
+            raise ComposerError(f"example role {role!r} must be user/assistant/system/tool")
         out.append({"role": role, "content": content})
     return out
 
@@ -74,15 +129,31 @@ def _build_spec(
         voice = Prompt.ask("voice / persona", default=voice or "")
 
     # Tools: optional, comma-separated names. Show what is available.
-    tools = [t.strip() for t in ",".join(tools_raw).split(",") if t.strip()]
+    tools = parse_tools(",".join(tools_raw))
     if not tools and interactive:
         from rich.prompt import Prompt
+        from rich.text import Text
 
         hint = ", ".join(t.name for t in available) or "(none)"
-        raw = Prompt.ask(
-            "tools (comma-separated, blank for none)", default="", suffix=f"  [{hint}]"
-        )
-        tools = [t.strip() for t in raw.split(",") if t.strip()]
+        prompt_text = Text("tools (comma-separated, blank for none)")
+        prompt_text.append(f"  [{hint}]")
+        while True:
+            raw = Prompt.ask(prompt_text, default="")
+            tools = parse_tools(raw)
+            if not tools:  # blank -> accept "no tools"
+                break
+            try:
+                resolve_tools(tools, available)  # clean error on unknown name
+                break
+            except ComposerError as exc:
+                print(f"  {exc}")
+            if not tools:
+                break
+            try:
+                resolve_tools(tools, available)
+                break
+            except ComposerError as exc:
+                print(f"  {exc}")
 
     # Context: optional.
     if context is None and interactive:
@@ -90,16 +161,17 @@ def _build_spec(
 
         context = Prompt.ask("context block (blank for none)", default=context or "")
 
-    # Examples: optional.
+    # Examples: optional. The wizard shares parse_examples_pairs with the flag
+    # so a bad role (e.g. bogus=hi) is rejected here exactly as it is for --example.
     if not examples and interactive:
         from rich.prompt import Prompt
 
         raw = Prompt.ask("examples (role=content pairs, blank for none)", default="")
         if raw.strip():
-            for pair in raw.split("|"):
-                role, sep, content = pair.partition("=")
-                if sep and role.strip():
-                    examples.append({"role": role.strip(), "content": content})
+            # Blank tokens (e.g. "||" or a trailing "|") are not pairs; drop them so
+            # parse_examples_pairs only sees actual ROLE=CONTENT items.
+            items = [tok for tok in raw.split("|") if tok.strip()]
+            examples.extend(parse_examples_pairs(items))
 
     # Sign-off: optional.
     if signoff is None and interactive:
@@ -109,11 +181,11 @@ def _build_spec(
 
     spec = Spec(
         name=name,
-        voice=(voice.strip() or None) if voice else None,
+        voice=(unquote_once(voice) or None) if voice else None,
         tools=tools,
-        context=(context.strip() or None) if context else None,
+        context=(unquote_once(context) or None) if context else None,
         examples=examples or None,
-        signoff=(signoff.strip() or None) if signoff else None,
+        signoff=(unquote_once(signoff) or None) if signoff else None,
     )
     return spec
 
@@ -178,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
         try:
-            examples = _parse_examples(args.example)
+            examples = parse_examples_pairs(args.example)
         except ComposerError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
