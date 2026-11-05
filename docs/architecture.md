@@ -93,7 +93,7 @@ no auth, single-user by design — see below.
   `examples.jsonl`, then hooks may adjust). It is a convenience surface: hooks
   keep full control and win on every channel. See `manual.md`, "Prompting".
 - **Deliberately out of scope:** persistence, auth, multi-user concurrency,
-  rate limiting, config files, token accounting display, non-OpenAI tool
+  rate limiting, config files, non-OpenAI tool
   dialects. Each is a planned extension point, not a bug. See also
   `docs/ideas.md` for smaller deferred items (e.g. the `examples.jsonl`
   `{"query","answer"}` sugar).

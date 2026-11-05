@@ -26,6 +26,23 @@ def double(n: int) -> int:
 """
 
 
+@pytest.fixture(autouse=True)
+def _restore_registry():
+    """Snapshot the shared tool registry and restore it after each test.
+
+    The composed agent's ``make()`` registers its inlined reservoir tool (here
+    ``double``) into the shared ``agent_seed.tools.registry`` singleton. Without
+    a restore, those test-local tools leak into any later test that inspects the
+    registry (e.g. ``test_composer_catalog.py::test_missing_root_yields_builtins_only``
+    asserts the catalog is exactly the built-ins plus the seeded reservoir) — a
+    latent ordering bug. This fixture makes the e2e tests hermetic against the
+    shared registry."""
+    before = dict(registry._tools)
+    yield
+    registry._tools.clear()
+    registry._tools.update(before)
+
+
 def _make_reservoir_tools(tmp_path) -> object:
     reservoir = tmp_path / "tools"
     reservoir.mkdir()

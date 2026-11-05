@@ -144,7 +144,7 @@ That's a hook. It's just a few lines that run at the end of every answer.
        return Hooks(finish=finish)
    ```
 
-   Change the `— your tutor 💡` line to whatever sign-off you like.
+    Change the `— your tutor` line to whatever sign-off you like.
 
 2. **Restart the backend**, then in the REPL:
 

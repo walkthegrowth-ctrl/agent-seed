@@ -34,7 +34,7 @@ client-only task (see `docs/protocol.md`).
 
 Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/). Runtime libs:
 `fastapi`, `uvicorn`, `httpx2`, `rich`, `prompt_toolkit`. Dev: `pytest`,
-`pytest-asyncio`.
+`pytest-asyncio`, `ruff`.
 
 No LLM SDK — a thin `httpx2` client speaks the OpenAI chat-completions API
 directly, so any OpenAI-compatible endpoint works (Ollama, LM Studio, vLLM,

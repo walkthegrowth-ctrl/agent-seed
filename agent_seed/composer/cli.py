@@ -147,13 +147,6 @@ def _build_spec(
                 break
             except ComposerError as exc:
                 print(f"  {exc}")
-            if not tools:
-                break
-            try:
-                resolve_tools(tools, available)
-                break
-            except ComposerError as exc:
-                print(f"  {exc}")
 
     # Context: optional.
     if context is None and interactive:
