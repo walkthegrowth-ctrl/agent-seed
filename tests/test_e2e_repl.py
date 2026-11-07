@@ -442,3 +442,123 @@ def test_quit_exits_cleanly(repl: ReplDriver, backend: dict[str, Any]) -> None:
     # The backend is still healthy after the REPL has exited.
     with httpx2.Client(timeout=5) as client:
         assert client.get(f"{backend['url']}/health").status_code == 200
+
+
+def test_agent_unknown_is_rejected_cleanly(repl: ReplDriver) -> None:
+    """`/agent <n>` where <n> is not a discoverable agent must be rejected by
+    the REPL, not silently fall back to the default via the backend."""
+    out = repl.send("/agent nope_agent")
+    assert "unknown agent" in out.lower(), out[:1200]
+    # The main agent is still in effect (no switch was committed).
+    out2 = repl.send("/agent")
+    assert "(default)" in out2, out2[:1200]
+    # REPL is still alive.
+    _assert_repl_alive(repl, out)
+
+
+def test_agent_default_returns_to_main_agent(repl: ReplDriver) -> None:
+    out = repl.send("/agent alpha")
+    assert "agent: alpha" in out, out[:1200]
+    # Now switch back to main using the reserved name.
+    out2 = repl.send("/agent default")
+    assert "agent:" in out2 and "(default)" in out2, out2[:1200]
+    # Confirm the *current* agent is now the main one.
+    out3 = repl.send("/agent")
+    assert "(default)" in out3, out3[:1200]
+    _assert_repl_alive(repl, out2)
+
+
+def test_usage_toggle_off_suppresses_line(fake_server: FakeLLMServer, repl: ReplDriver) -> None:
+    """`/usage off` disables the per-turn `in=/out=` line, but `/usage` still
+    shows the session total (the toggle is display-only, not state)."""
+    fake_server.reset(text("hi there"))
+    out = repl.send("/usage off")
+    assert "per-turn" in out.lower() and "off" in out.lower(), out[:1200]
+    # Turn: the REPL must NOT print an in=/out= line even though the backend
+    # recorded usage.
+    out2 = repl.send("hello again")
+    assert "in=" not in out2 or "out=" not in out2, (
+        f"per-turn report must be off after /usage off:\n{out2[:1200]}"
+    )
+    # But /usage still shows the cumulative session total.
+    out3 = repl.send("/usage")
+    assert "session:" in out3, out3[:1200]
+    # Per-turn report state is still "off" after this.
+    assert "per-turn" in out3.lower() and "off" in out3.lower(), out3[:1200]
+
+
+def test_usage_toggle_on_restores_line(fake_server: FakeLLMServer, repl: ReplDriver) -> None:
+    fake_server.reset(text("hi"), text("hello"))
+    repl.send("/usage off")
+    # A single turn is now silent about per-turn tokens.
+    repl.send("a message")
+    # Re-enable; the next turn shows the line again.
+    out = repl.send("/usage on")
+    assert "per-turn" in out.lower() and "on" in out.lower(), out[:1200]
+    out2 = repl.send("another message")
+    assert "in=" in out2 and "out=" in out2, (
+        f"per-turn report must be back on after /usage on:\n{out2[:1200]}"
+    )
+
+
+def test_per_turn_usage_line_is_on_own_line(fake_server: FakeLLMServer, repl: ReplDriver) -> None:
+    """The per-turn usage line must not glue onto the final streamed token."""
+    fake_server.reset(text("one two"))
+    out = repl.send("say hi")
+    # The last token of the answer is "two"; the usage line must be on its own
+    # line (not on the same line as "two").
+    # We can't parse ANSI cleanly here, but the plain "in=" substring must
+    # appear somewhere on a line that is *not* the final "two".
+    assert "in=" in out and "out=" in out, (
+        f"per-turn line must be rendered (default is on):\n{out[:1200]}"
+    )
+    # The `in=...out=...` string must appear on a single line that does NOT
+    # also contain "two" (the last token of "one two").
+    # (The previous bug was this: the final print landed after the last token
+    # without a newline, so the line contained e.g. "two in=4 out=6 ...".)
+    found_on_same_line = False
+    for line in out.splitlines():
+        if "in=" in line and "two" in line:
+            # This line contains the final token AND the usage — the bug.
+            found_on_same_line = True
+            break
+    assert not found_on_same_line, (
+        f"the per-turn line must be on its own line, not glued to the last token:\n{out[:1200]}"
+    )
+
+
+def test_help_output_is_column_aligned(repl: ReplDriver) -> None:
+    """Every command row's description must start at the same visual column.
+
+    The old hand-padded string left `/model force <n>` and `/model test <n>`
+    two spaces short of `/model <n>`'s descriptions. The new layout pads *every*
+    command to the widest one, so all rows' descriptions begin in the same
+    column. We assert this against the *REPL's own* `HELP` string: it's the
+    exact text passed to `rich.panel.Panel`, so any misalignment there is a
+    misalignment on screen (the panel only wraps, it never re-indents).
+    """
+    from agent_seed.frontends.repl.app import HELP
+
+    # Reference: the short `/help` row.
+    help_row = next(ln for ln in HELP.splitlines() if ln.lstrip().startswith("/help"))
+    ref = help_row.index("show this help")
+    # Each previously-misaligned command (and `/model <n>` as a second reference)
+    # must have its description at the same column.
+    for cmd in ("/model force <n>", "/model test <n>", "/model <n>"):
+        row = next(ln for ln in HELP.splitlines() if cmd in ln)
+        idx = row.index(cmd) + len(cmd)
+        col = idx
+        while col < len(row) and row[col] == " ":
+            col += 1
+        assert col > idx, f"{cmd} row has no padding gap:\n{row}"
+        assert col == ref, (
+            f"{cmd} description at column {col} (row: {row!r}), "
+            f"expected {ref} (reference: {help_row!r})"
+        )
+    # The panel itself must still render a /help block that contains the
+    # reference row's description text (sanity: the REPL did not regress the
+    # help body while adding the new rows).
+    out = repl.send("/help")
+    assert "show this help" in out, out[:1200]
+    assert "/agent default" in out, f"the /agent default row must be in the help:\n{out[:1200]}"
+    assert "/usage" in out, out[:1200]

@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..discovery import RESERVED_AGENT_NAME
 from .catalog import Tool
 
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
@@ -78,7 +79,17 @@ class Plan:
 
 
 def validate_name(name: str) -> str:
-    """Ensure ``name`` is a safe folder name (no separators, dots, or traversal)."""
+    """Ensure ``name`` is a safe folder name (no separators, dots, or traversal).
+
+    ``default`` is also rejected: it is reserved for the main agent (see
+    :data:`agent_seed.discovery.RESERVED_AGENT_NAME`), so a hooks subdirectory may
+    not bear it — composing ``default/`` would shadow the ``/agent default``
+    switch-back surface and the API's ``agent_name="default"``.
+    """
+    if name == RESERVED_AGENT_NAME:
+        raise ComposerError(
+            f"agent name {name!r} is reserved for the (main) agent; choose another name"
+        )
     if (
         not name
         or "/" in name

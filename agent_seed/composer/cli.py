@@ -14,6 +14,7 @@ import os
 import sys
 from io import UnsupportedOperation
 
+from ..discovery import find_reserved_subdir
 from .catalog import Tool, list_tools
 from .generator import ComposerError, Plan, Spec, generate, validate_name, write_plan
 
@@ -259,13 +260,27 @@ def main(argv: list[str] | None = None) -> int:
             available=available,
         )
 
+        root = args.root or DEFAULT_ROOT
+
+        # A `default/` subdirectory in the hooks root is anomalous: it is
+        # reserved (see agent_seed.discovery.RESERVED_AGENT_NAME) and must be
+        # renamed or removed. Warn on every compose run that scans the root so
+        # the user sees it, without blocking a valid compose.
+        stray = find_reserved_subdir(root)
+        if stray is not None:
+            print(
+                f"warning: {stray} exists, but {stray.name!r} is reserved for the "
+                "main agent; rename or remove it so it does not shadow "
+                'agent_name="default"',
+                file=sys.stderr,
+            )
+
         plan: Plan = generate(spec.name, spec, available)
 
         if args.dry_run:
             print(plan.rendered())
             return 0
 
-        root = args.root or DEFAULT_ROOT
         write_plan(plan, root, force=args.force)
         _print_next_steps(plan, root, spec.name)
         return 0

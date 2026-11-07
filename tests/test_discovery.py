@@ -9,6 +9,7 @@ from agent_seed.discovery import (
     DiscoveryError,
     _root_folder,
     discover,
+    find_reserved_subdir,
     get_hooks,
     get_hooks_for_agent,
     list_agents,
@@ -401,6 +402,43 @@ def test_list_agents(tmp_path, monkeypatch):
 def test_list_agents_no_root(tmp_path, monkeypatch):
     monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path / "no"))
     assert list_agents() == []
+
+
+def test_list_agents_excludes_reserved_default(tmp_path, monkeypatch):
+    # A stray `default/` subdirectory is the reserved main-agent name: it must
+    # never be offered as a selectable agent.
+    root = tmp_path / "hooks_root"
+    (root / "alpha").mkdir(parents=True)
+    (root / "default").mkdir(parents=True)
+    monkeypatch.setenv("HOOKS_ROOT", str(root))
+    reset_cache()
+    assert list_agents() == ["alpha"]
+
+
+def test_resolve_reserved_default_maps_to_root(tmp_path, monkeypatch):
+    root = tmp_path / "hooks_root"
+    (root / "default").mkdir(parents=True)  # even a literal default/ present
+    (root / "alpha").mkdir(parents=True)
+    monkeypatch.setenv("HOOKS_ROOT", str(root))
+    reset_cache()
+    # "default" always resolves to the main agent (the root), never to a folder.
+    assert resolve_hooks_folder("default") == root.resolve()
+    # other names still resolve normally, and none falls back to the root.
+    assert resolve_hooks_folder("alpha") == (root / "alpha").resolve()
+    assert resolve_hooks_folder(None) == root.resolve()
+
+
+def test_find_reserved_subdir_reports_a_default_folder(tmp_path, monkeypatch):
+    root = tmp_path / "hooks_root"
+    root.mkdir(parents=True)
+    monkeypatch.setenv("HOOKS_ROOT", str(root))
+    assert find_reserved_subdir() is None  # no default/ yet
+    stray = root / "default"
+    stray.mkdir()
+    assert find_reserved_subdir() == stray
+    assert find_reserved_subdir(root) == stray  # explicit folder arg
+    stray.rmdir()
+    assert find_reserved_subdir(root) is None
 
 
 def test_hook_root_only_applies_to_default_agent(tmp_path, monkeypatch):

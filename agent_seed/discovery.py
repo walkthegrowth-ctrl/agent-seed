@@ -22,7 +22,12 @@ Public API
   cached.
 * ``list_agents()`` — the sorted names of subdirectories of the root, i.e. the
   discoverable ``agent_name`` values (an empty list when the root is absent or
-  flat).
+  flat); the reserved ``default`` folder is excluded.
+* ``RESERVED_AGENT_NAME`` — the name reserved for the main agent (``"default"``);
+  a hooks subdirectory must not bear it, and ``agent_name="default"`` resolves to
+  the root.
+* ``find_reserved_subdir(folder=None)`` — the path of a stray ``default``
+  subdirectory (a folder that must be renamed/removed), or ``None``.
 * ``reset_cache()`` — drop all cached discoveries (for tests / hot reload).
   The cache is per resolved folder; changing ``$HOOKS_ROOT`` between calls
   requires ``reset_cache()`` to take effect.
@@ -63,6 +68,14 @@ from .hooks import Hooks
 
 DEFAULT_HOOKS_FOLDER = "hook_modules"
 
+#: The name reserved for the *main* agent (the hooks root). A hooks subdirectory
+#: may not be named this: it would collide with the "switch back to default"
+#: surface (the REPL's ``/agent default``), the composer (``agent compose default``),
+#: and the API's ``agent_name="default"``. Enforced in the composer
+#: (:func:`agent_seed.composer.generator.validate_name`) and surfaced by
+#: :func:`find_reserved_subdir` (a scan that complains about an existing folder).
+RESERVED_AGENT_NAME = "default"
+
 _CACHE: dict[Path, Hooks] = {}
 
 
@@ -96,12 +109,13 @@ def resolve_hooks_folder(agent_name: str | None = None) -> Path:
 
     If ``agent_name`` names a subdirectory of the root (``hook_modules/<name>``)
     that directory is returned. Otherwise the root itself is returned (the
-    "default agent"). Traversal (``..``) and names escaping the root are
-    rejected and fall back to the root.
+    "default agent"). A name equal to :data:`RESERVED_AGENT_NAME` always resolves
+    to the root (the main agent) — it is never a literal folder. Traversal (``..``)
+    and names escaping the root are rejected and fall back to the root.
     """
     root = _root_folder()
     root_resolved = root.resolve()
-    if agent_name:
+    if agent_name and agent_name != RESERVED_AGENT_NAME:
         candidate = root_resolved / agent_name
         try:
             real = candidate.resolve()
@@ -118,11 +132,34 @@ def get_hooks_for_agent(agent_name: str | None = None) -> Hooks:
 
 
 def list_agents() -> list[str]:
-    """Names of subdirectories of the root (potential ``agent_name`` values)."""
+    """Names of subdirectories of the root (potential ``agent_name`` values).
+
+    The :data:`RESERVED_AGENT_NAME` folder (``default``), if present, is excluded:
+    it names the main agent, not a selectable agent, so it must never be offered
+    as one (the user switches back to it with ``/agent default``).
+    """
     root = _root_folder()
     if not root.is_dir():
         return []
-    return sorted(d.name for d in root.iterdir() if d.is_dir() and d.name != "__pycache__")
+    return sorted(
+        d.name
+        for d in root.iterdir()
+        if d.is_dir() and d.name != "__pycache__" and d.name != RESERVED_AGENT_NAME
+    )
+
+
+def find_reserved_subdir(folder: str | Path | None = None) -> Path | None:
+    """The path of a ``default`` subdirectory under ``folder`` (default: the
+    hooks root), or ``None`` if there is none.
+
+    ``default`` is reserved for the main agent, so a ``hook_modules/default/``
+    folder is anomalous: something created it before the reservation, or by
+    hand. Callers (e.g. the composer) surface this as a complaint and direct the
+    user to rename or delete it.
+    """
+    base = Path(folder) if folder is not None else _root_folder()
+    candidate = base / RESERVED_AGENT_NAME
+    return candidate if candidate.is_dir() else None
 
 
 def discover(folder: Path) -> Hooks:

@@ -115,3 +115,36 @@ def test_invalid_example_role_is_rejected(capsys, monkeypatch):
     rc = composer_cli.main(["tutor", "--example", "bogus=hello"])
     assert rc == 2
     assert "must be user/assistant/system/tool" in capsys.readouterr().err
+
+
+def test_reserved_default_name_is_rejected(capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(composer_cli, "_is_interactive", lambda: False)
+    fake_tools = [Tool(name="calculator", description="Arithmetic.", in_registry=True)]
+    monkeypatch.setattr(composer_cli, "list_tools", lambda: fake_tools)
+
+    rc = composer_cli.main(
+        ["default", "--voice", "whatever", "--root", str(tmp_path), "--dry-run"]
+    )
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "reserved" in err, err
+
+
+def test_stray_default_subdir_warns_on_scan(capsys, monkeypatch, tmp_path):
+    """A pre-existing `default/` folder in the hooks root must trigger a
+    stderr warning (the reservation complaint) without aborting a valid
+    compose of a *different* name."""
+    monkeypatch.setattr(composer_cli, "_is_interactive", lambda: False)
+    fake_tools = [Tool(name="calculator", description="Arithmetic.", in_registry=True)]
+    monkeypatch.setattr(composer_cli, "list_tools", lambda: fake_tools)
+
+    root = tmp_path / "hooks"
+    (root / "default").mkdir(parents=True)  # anomalous folder
+    (root / "default" / "prompt.md").write_text("stale")
+
+    rc = composer_cli.main(["tutor", "--voice", "you are a tutor", "--root", str(root)])
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "reserved" in err, f"expected a stderr warning, got: {err!r}"
+    # The *other* folder was written, proving the warning didn't block the write.
+    assert (root / "tutor" / "prompt.md").read_text().strip() == "you are a tutor"

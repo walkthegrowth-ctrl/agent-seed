@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from ...core import is_number
+from ...discovery import RESERVED_AGENT_NAME
 
 CONSOLE = Console()
 
@@ -227,29 +228,55 @@ def format_tokens(usage: dict[str, Any] | None) -> str:
 
 # -- REPL main loop ----------------------------------------------------------
 
-HELP = """[bold]commands[/]
-  /help        show this help
-  /reset       start a new session (clears server-side history)
-  /agent [n]   set the agent (a hooks subdirectory); no arg shows current
-  /agents      list discoverable agent names from the backend
-  /tools       list tools registered on the backend
-  /usage       show the session's cumulative token usage
-  /model       show the session's LLM config
-  /model <n>   switch the model (probe first; abort if the model is not reachable)
-  /model force <n>  switch without a probe (use when probe can't reach it)
-  /model test <n>  ping-test a model without switching
-  /quit        exit
-  /            (alone) open a multi-line block — see below
 
-[bold]multi-line mode[/]
-  Type [bold]/[/] and press Enter to open a block. Then type as many
-  lines as you want (blank lines are kept, slash commands are treated
-  as plain text). Close and send by typing [bold]/[/] alone on a line
-  and pressing Enter. The two / delimiters are stripped from the
-  message; the text between them is sent as-is. Ctrl-C cancels the
-  draft and returns to normal mode; Ctrl-D exits the REPL.
+def _agent_label(session: Session) -> str:
+    """The on-screen agent label: the name, or ``(default)`` for the main agent."""
+    return session.agent_name or "(default)"
 
-Type a message and press Enter. Ctrl-D also exits."""
+
+def _help_layout() -> str:
+    """The ``/help`` text, with command names padded so descriptions align.
+
+    Every command row is built from ``(cmd, description)`` and padded to a
+    common column (max command width + 3), so adding / renaming a command
+    can't drift the alignment — the old hand-padded string left
+    ``/model force <n>`` and ``/model test <n>`` two short against
+    ``/model <n>``.
+    """
+    commands = [
+        ("/help", "show this help"),
+        ("/reset", "start a new session (clears server-side history)"),
+        ("/agent [n]", "set the agent (a hooks subdirectory); no arg shows the current"),
+        ("/agent default", "switch back to the main agent (the hooks root)"),
+        ("/agents", "list the discoverable agent names on the backend"),
+        ("/tools", "list the tools registered on the backend"),
+        ("/usage", "session total; `on`/`off`/`toggle` for the per-turn report"),
+        ("/model", "show the session's LLM config"),
+        ("/model <n>", "switch the model (probes first; aborts if the model is unreachable)"),
+        ("/model force <n>", "switch the model without a probe"),
+        ("/model test <n>", "probe a model without switching"),
+        ("/quit", "exit the REPL"),
+        ("/", "(alone) open a multi-line block — see below"),
+    ]
+    width = max(len(cmd) for cmd, _ in commands)
+    body = "\n".join(f"  {cmd:<{width + 3}}{desc}" for cmd, desc in commands)
+    return (
+        "[bold]commands[/]\n"
+        + body
+        + "\n\n[bold]multi-line mode[/]\n"
+        + (
+            "  Type [bold]/[/] and press Enter to open a block. Then type as many\n"
+            "  lines as you want (blank lines are kept, slash commands are treated\n"
+            "  as plain text). Close and send by typing [bold]/[/] alone on a line\n"
+            "  and pressing Enter. The two / delimiters are stripped from the\n"
+            "  message; the text between them is sent as-is. Ctrl-C cancels the\n"
+            "  draft and returns to normal mode; Ctrl-D exits the REPL.\n\n"
+            "Type a message and press Enter. Ctrl-D also exits the REPL."
+        )
+    )
+
+
+HELP = _help_layout()
 
 
 class Repl:
@@ -257,6 +284,14 @@ class Repl:
         self.session: Session | None = None
         self.url = url
         self.use_history = use_history
+        # Per-turn usage report (the ``in=/out=/=`` line after each answer).
+        # On by default; toggle with ``/usage on|off|toggle`` (see ``_command``).
+        # Runtime REPL state, like ``use_history`` (not persisted across sessions).
+        self.show_usage: bool = True
+        # Whether tokens were streamed this turn and an answer line is still open
+        # (so the next CONSOLE output — a tool line, the usage line, etc. — starts
+        # on its own line instead of gluing onto the last streamed token).
+        self._line_open: bool = False
 
     def _open_session(self) -> Session:
         try:
@@ -345,18 +380,34 @@ class Repl:
 
     # -- one chat turn -------------------------------------------------------
 
+    def _close_line(self) -> None:
+        """Terminate a streamed answer line so the next print starts on its own.
+
+        Once tokens have been streamed this turn, the cursor sits mid-line after
+        the last token (no newline yet). Anything printed before the turn ends —
+        a tool line, the usage line, an error — would glue onto that last token.
+        Calling this first drops a newline; it is idempotent (no-op once closed).
+        """
+        if self._line_open:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            self._line_open = False
+
     def _turn(self, session: Session, message: str) -> None:
-        first = True
+        self._line_open = False
+        started = False
         try:
             for event, payload in session.chat_stream(message):
                 if event == "token":
                     token = payload.get("text", "")
-                    if first:
+                    if not started:
                         CONSOLE.print("agent> ", end="")
-                        first = False
+                        started = True
+                        self._line_open = True
                     sys.stdout.write(token)
                     sys.stdout.flush()
                 elif event == "tool":
+                    self._close_line()
                     render_tool_event(
                         CONSOLE,
                         payload.get("name", "?"),
@@ -364,19 +415,43 @@ class Repl:
                         payload.get("result", ""),
                     )
                 elif event == "error":
+                    self._close_line()
                     CONSOLE.print(f"[bold red]error:[/] {payload.get('message')}")
                 elif event == "done":
                     if payload.get("usage_session") is not None:
                         session.usage_session = dict(payload["usage_session"])
                     turn_usage = payload.get("usage")
-                    if turn_usage:
+                    if turn_usage and self.show_usage:
+                        self._close_line()
                         CONSOLE.print(f"[dim]{format_tokens(turn_usage)}[/]")
                     # "done" is terminal; loop ends
-            if not first:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+            self._close_line()
         except httpx2.HTTPError as exc:
+            self._close_line()
             CONSOLE.print(f"[bold red]backend error:[/] {exc}")
+
+    def _switch_agent(self, session: Session, name: str) -> bool:
+        """Validate ``name`` against the backend and commit the agent switch.
+
+        ``default`` (a reserved name) always names the main agent. Everything else
+        must appear in ``GET /agents`` — so a typo or a nonexistent folder is
+        rejected here instead of silently falling back on the backend. Returns
+        ``True`` if a switch was committed, ``False`` if rejected.
+        """
+        if name == RESERVED_AGENT_NAME:
+            session.set_agent(None)
+            return True
+        try:
+            valid = session.agents()
+        except httpx2.HTTPError:
+            valid = None
+        if valid is not None and name not in valid:
+            hint = ", ".join(valid) if valid else "(none on the backend)"
+            CONSOLE.print(f"[red]unknown agent:[/] {name} (available: {hint})")
+            CONSOLE.print("[dim]see /agents, or /agent default to use the main agent[/]")
+            return False
+        session.set_agent(name)
+        return True
 
     # -- slash commands ------------------------------------------------------
 
@@ -390,12 +465,12 @@ class Repl:
             CONSOLE.print("[dim]session reset[/]")
             return True
         if cmd == "/agent":
-            parts = text.split(None, 1)
-            if len(parts) < 2:
-                CONSOLE.print(f"agent: [bold cyan]{session.agent_name or '(default)'}[/]")
-            else:
-                session.set_agent(parts[1].strip() or None)
-                CONSOLE.print(f"agent: [bold cyan]{session.agent_name or '(default)'}[/]")
+            if text.strip() == cmd:
+                CONSOLE.print(f"agent: [bold cyan]{_agent_label(session)}[/]")
+                return True
+            name = text.split(None, 1)[1].strip()
+            if self._switch_agent(session, name):
+                CONSOLE.print(f"agent: [bold cyan]{_agent_label(session)}[/]")
             return True
         if cmd == "/agents":
             names = session.agents()
@@ -403,14 +478,33 @@ class Repl:
                 CONSOLE.print("[dim]no discoverable agents on the backend[/]")
             else:
                 CONSOLE.print("[bold]agents:[/] " + ", ".join(names))
+            CONSOLE.print("[dim]switch back to the main agent with /agent default[/]")
             return True
         if cmd == "/usage":
+            parts = text.split(None, 1)
+            arg = parts[1].strip().lower() if len(parts) > 1 else None
+            if arg in ("on", "off", "toggle"):
+                if arg == "toggle":
+                    self.show_usage = not self.show_usage
+                else:
+                    self.show_usage = arg == "on"
+                state = "on" if self.show_usage else "off"
+                CONSOLE.print(f"[bold]usage:[/] per-turn report {state}")
+                return True
+            if arg is not None:
+                CONSOLE.print(
+                    "[red]usage:[/] /usage [on|off|toggle]  (with no arg: the session total)"
+                )
+                return True
             total = session.usage_session
             if not total:
                 CONSOLE.print("[dim]no usage recorded yet (no turns, or backend sent none)[/]")
             else:
                 CONSOLE.print(f"[bold]session:[/] {format_tokens(total)}")
-            CONSOLE.print("[dim]session total resets with the history (use /reset)[/]")
+            CONSOLE.print(
+                f"[dim]per-turn report: {'on' if self.show_usage else 'off'} — "
+                "toggle with /usage on|off|toggle; the total resets with /reset[/]"
+            )
             return True
         if cmd == "/tools":
             names = session.tools_names()

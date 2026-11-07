@@ -26,6 +26,17 @@ class _FakeSession:
         # configurable probe outcome
         self.probe_ok: bool = True
         self.probe_error: str | None = None
+        # agents(): the backend-reported discoverable agents.
+        self._agents: list[str] = ["alpha", "beta"]
+        self.agent_set_calls: list[str | None] = []
+        self.agent_name: str | None = None
+
+    def agents(self) -> list[str]:
+        return list(self._agents)
+
+    def set_agent(self, name: str | None) -> None:
+        self.agent_set_calls.append(name)
+        self.agent_name = name
 
     def chat_stream(self, message: str) -> Iterator[tuple[str, dict[str, Any]]]:
         self.sent.append(message)
@@ -87,6 +98,7 @@ def _run_with_inputs(
         return item
 
     repl = app_module.Repl("http://example.invalid", use_history=False)
+    session.repl = repl  # back-reference so tests can inspect Repl state
     with pytest.MonkeyPatch().context() as m:
         m.setattr(app_module, "prompt", fake_prompt)
         m.setattr(app_module.CONSOLE, "print", fake_print)
@@ -228,6 +240,54 @@ def test_model_usage_errors_remain_in_normal_mode() -> None:
     assert any("usage" in t.lower() for t in prints)
 
 
+# -- /agent command -----------------------------------------------------------
+
+
+def test_agent_no_arg_shows_current() -> None:
+    session = _mk_session()
+    session.agent_name = "alpha"
+    _run_with_inputs(["/agent", "/quit"], session=session)
+    # No switch committed just by displaying the current agent.
+    assert session.agent_set_calls == []
+    assert session.agent_name == "alpha"
+
+
+def test_agent_selects_a_known_agent() -> None:
+    session = _mk_session()
+    _run_with_inputs(["/agent alpha", "/quit"], session=session)
+    assert session.agent_set_calls == ["alpha"]
+    assert session.agent_name == "alpha"
+
+
+def test_agent_rejects_unknown_name() -> None:
+    # `gamma` is not in the fake's discoverable agents -> rejected, no switch.
+    session = _mk_session()
+    session, prints = _run_with_inputs(["/agent gamma", "/quit"], session=session)
+    assert session.agent_set_calls == []
+    assert session.agent_name is None
+    assert any("unknown agent" in t for t in prints)
+
+
+def test_agent_default_returns_to_main() -> None:
+    session = _mk_session()
+    session.agent_name = "alpha"
+    session, prints = _run_with_inputs(["/agent default", "/quit"], session=session)
+    # "default" is the reserved main agent -> set to None, even though there is
+    # no discoverable folder named "default".
+    assert session.agent_set_calls == [None]
+    assert session.agent_name is None
+    assert any("(default)" in t for t in prints)
+
+
+def test_agent_default_allowed_even_when_unknown_to_backend() -> None:
+    # Even with no backend agents at all, "default" must still select the main
+    # agent (it is special, not a discoverable name).
+    session = _mk_session()
+    session._agents = []
+    _run_with_inputs(["/agent default", "/quit"], session=session)
+    assert session.agent_set_calls == [None]
+
+
 # -- /usage command -----------------------------------------------------------
 
 
@@ -261,3 +321,53 @@ def test_reset_clears_session_usage_mirror() -> None:
     session, prints = _run_with_inputs(["a", "/reset", "/usage", "/quit"], session=session)
     assert session.usage_session == {}
     assert any("no usage recorded" in t for t in prints)
+
+
+# -- /usage on|off|toggle (the per-turn report) --------------------------------
+
+
+def test_usage_off_suppresses_the_per_turn_line() -> None:
+    # The per-turn line is off after `/usage off`, but the session's total can
+    # still be inspected with a bare `/usage`.
+    session, prints = _run_with_inputs(
+        ["/usage off", "hi there", "/usage", "/quit"], session=_mk_session()
+    )
+    # off was applied
+    assert session.repl.show_usage is False
+    # the turn's done event still updated the session mirror (backend state
+    # is independent of the display toggle)
+    assert session.usage_session.get("prompt_tokens") == 8
+    # but the per-turn in=/out= line did NOT appear
+    assert not any("in=4" in t and "out=6" in t for t in prints)
+    # the command reported its new state
+    assert any("per-turn" in t.lower() and "off" in t.lower() for t in prints)
+
+
+def test_usage_toggle_flips_the_state() -> None:
+    # Within one REPL (one Repl instance), on -> off -> on.
+    session, prints = _run_with_inputs(
+        ["/usage toggle", "/usage toggle", "/quit"], session=_mk_session()
+    )
+    # default is on; two toggles bring it back to on.
+    assert session.repl.show_usage is True
+    # the second (off→on) toggle reported `on`.
+    assert any("per-turn" in t.lower() and "on" in t.lower() for t in prints)
+
+
+def test_usage_toggle_from_off_back_to_on_allows_line_again() -> None:
+    session, prints = _run_with_inputs(
+        ["/usage off", "first", "/usage on", "second", "/quit"],
+        session=_mk_session(),
+    )
+    assert session.repl.show_usage is True
+    # `second` should have the per-turn line (report is back on); `first`
+    # should not. Both appear in the printed buffer in order — distinguish by
+    # counting the per-turn lines rendered (exactly one, for `second`).
+    per_turn = [t for t in prints if "in=4" in t and "out=6" in t]
+    assert len(per_turn) == 1, prints
+
+
+def test_usage_unknown_arg_is_clean_error() -> None:
+    session, prints = _run_with_inputs(["/usage maybe", "/quit"], session=_mk_session())
+    assert session.repl.show_usage is True  # unchanged
+    assert any("usage:" in t for t in prints)

@@ -32,6 +32,13 @@ def test_validate_name_rejects_bad_names():
             validate_name(bad)
 
 
+def test_validate_name_rejects_reserved_default():
+    # `default` is reserved for the main agent: composing it is an error (it
+    # would shadow the /agent default switch-back and agent_name="default").
+    with pytest.raises(ComposerError, match="reserved"):
+        validate_name("default")
+
+
 def test_validate_name_accepts_good():
     validate_name("alpha")
     validate_name("tutor-1")
