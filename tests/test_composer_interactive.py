@@ -10,10 +10,11 @@ inspects the resulting files on disk, or types a bad value and asserts a
 next prompt).
 
 Cases:
-1. Full wizard happy path — every channel filled → the 5 promised files
-   exist with the promised content.
-2. Blank optional prompts — only a name filled → the folder is empty
-   (the "agent is exactly as big as asked" contract).
+ 1. Full wizard happy path — every channel filled → the 5 promised files
+    exist with the promised content.
+ 2. Blank optional prompts — only a name filled → the folder is the neutral
+    skeleton (all 5 channel files + a README): each file is a placeholder
+    stub, the Python ones wired to the right hook slot with a no-op body.
 3. Name re-validation loop — an invalid name triggers a re-prompt.
 4. Unknown tool name → a clean error; the wizard does NOT advance to
    ``context``.
@@ -134,8 +135,9 @@ def test_full_wizard_happy_path(compose: ComposeDriver) -> None:
 
 
 def test_blank_optional_fields_are_skipped(compose: ComposeDriver) -> None:
-    """Only a name (all optional prompts blank) creates an *empty* folder —
-    the "agent is exactly as big as asked" contract (empty agent is valid)."""
+    """Only a name (all optional prompts blank) creates a *neutral skeleton* —
+    the five placeholder files plus a README. The contract: the folder loads
+    and works, but the stubs change no behaviour; each file is a place to grow from."""
     compose.advance("solo", "voice", settle=1.2, timeout=25)
     # voice: Enter (blank).
     compose.advance("", "tools", settle=1.2, timeout=25)
@@ -152,7 +154,22 @@ def test_blank_optional_fields_are_skipped(compose: ComposeDriver) -> None:
     folder = compose.created_dir("solo")
     assert folder.is_dir()
     files = {p.name for p in folder.glob("*") if p.is_file()}
-    assert files == set(), f"a blank-wizard folder should be empty, got {files}"
+    assert files == {
+        "prompt.md",
+        "context.md",
+        "examples.jsonl",
+        "tools.py",
+        "sign.py",
+        "README.md",
+    }, f"a blank-wizard folder should carry the neutral skeleton, got {files}"
+    # The Python stubs are loadable (the hook contract stays valid) and the
+    # text channels are empty placeholders (they add nothing to the prompt).
+    assert (folder / "prompt.md").read_text(encoding="utf-8") == ""
+    assert (folder / "context.md").read_text(encoding="utf-8") == ""
+    assert (folder / "examples.jsonl").read_text(encoding="utf-8") == ""
+    assert "def enter_agent" in (folder / "tools.py").read_text(encoding="utf-8")
+    assert "def finish" in (folder / "sign.py").read_text(encoding="utf-8")
+    assert "solo" in (folder / "README.md").read_text(encoding="utf-8")
 
 
 # ------------------------------------------------------------------------------

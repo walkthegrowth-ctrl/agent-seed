@@ -265,6 +265,14 @@ class Agent:
         - the switch is then committed (``ctx.agent_name`` updated; hooks
           re-resolved unless an explicit ``Hooks`` was supplied at
           construction, which always wins).
+        - the **identity** (``ctx.base_prompt`` / ``ctx.system_prompt``) is
+          re-seeded from the incoming agent's declared prompt (its
+          ``Hooks.prompt`` loaded from ``prompt.md``, falling back to the
+          built-in default when that file is absent). The outgoing agent's
+          sticky value does **not** leak into the new one; an agent that
+          wants a customized identity writes it in its own ``enter_agent``
+          (or ``before_llm``), which runs *after* the re-seed and therefore
+          wins.
         - the **incoming** agent's ``enter_agent`` fires (``ctx.agent_name`` is
           now the *new* value).
 
@@ -295,6 +303,16 @@ class Agent:
         # prevents the outgoing agent's sticky value from leaking across the
         # shared RunContext.
         self._context.allowed_tools = None
+        # The identity follows the active agent: a file-defined agent (an
+        # agent folder that carries only prompt.md, no hooks) has no hook
+        # that will write the identity for it, so the core seeds it here from
+        # the incoming agent's declared prompt (Hooks.prompt -> built-in
+        # default). The outgoing agent's sticky value is replaced, not
+        # carried over. The incoming agent's enter_agent (below) fires
+        # afterwards and may override/extend either — hooks stay in control.
+        identity = self.hooks.prompt or DEFAULT_SYSTEM_PROMPT
+        self._context.base_prompt = identity
+        self._context.system_prompt = identity
         # Incoming agent takes the wheel.
         if self.hooks.enter_agent is not None:
             self.hooks.enter_agent(self._context)

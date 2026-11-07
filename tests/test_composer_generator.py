@@ -48,10 +48,34 @@ def test_generate_voice_only():
     assert plan.files["prompt.md"].strip() == "You are helpful."
 
 
-def test_generate_no_channels_gives_empty_folder():
-    spec = Spec(name="n")
-    plan = generate("n", spec, AVAILABLE)
-    assert plan.files == {}
+def test_generate_no_channels_gives_skeleton():
+    """A spec with no channels yields a neutral skeleton (not an empty folder):
+    all five channel files present as placeholders, plus a README. Every file
+    is loadable and changes no behaviour, so the skeleton agent works but is a
+    place to grow from.
+    """
+    spec = Spec(name="otto")
+    plan = generate("otto", spec, AVAILABLE)
+    assert set(plan.files) == {
+        "context.md",
+        "examples.jsonl",
+        "prompt.md",
+        "README.md",
+        "sign.py",
+        "tools.py",
+    }
+    # Text channels are empty placeholders (0 bytes == discovery treats as unset).
+    assert plan.files["prompt.md"] == ""
+    assert plan.files["context.md"] == ""
+    assert plan.files["examples.jsonl"] == ""
+    # Python stubs wire the hook slot (make returns it) with a neutral body.
+    for stub_name in ("tools.py", "sign.py"):
+        stub = plan.files[stub_name]
+        assert "def enter_agent" in stub or "def finish" in stub
+        assert "def make() -> Hooks:" in stub
+    # README orients the user on what to edit.
+    assert "otto" in plan.files["README.md"]
+    assert "prompt.md" in plan.files["README.md"]
 
 
 def test_generate_tools_builtin_only():

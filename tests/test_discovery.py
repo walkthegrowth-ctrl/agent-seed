@@ -467,6 +467,72 @@ def test_set_agent_name_switches_hooks_and_refires_establishment(tmp_path, monke
     assert agent.agent_name is None
 
 
+def test_agent_switch_reseeds_identity_from_prompt_md(tmp_path, monkeypatch):
+    # A prompt.md-only agent (no enter_agent hook) must have its declared
+    # identity applied on the switch. Previously the sticky system_prompt
+    # from the root leaked across the switch, so the agent answered with the
+    # wrong identity. Also verifies that a prior set_model / hook's special-
+    # casing does not survive (the core re-seeds identity here).
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
+    (tmp_path / "prompt.md").write_text("ROOT IDENTITY\n")
+    (tmp_path / "otto").mkdir()
+    (tmp_path / "otto" / "prompt.md").write_text("OTTO IDENTITY\n")
+    (tmp_path / "gamma").mkdir()  # empty agent: no identity file, no hooks
+    reset_cache()
+
+    client = FakeLLMClient([text_completion("x")] * 5)
+    agent = Agent(client, ToolRegistry())
+    assert agent.base_prompt == "ROOT IDENTITY"
+    assert agent.system_prompt == "ROOT IDENTITY"
+
+    # Switch to the prompt.md-only agent: identity must follow the agent.
+    agent.set_agent_name("otto")
+    assert agent.base_prompt == "OTTO IDENTITY"
+    assert agent.system_prompt == "OTTO IDENTITY"
+
+    # Back to the root: identity follows back (no sticky leak from otto).
+    agent.set_agent_name(None)
+    assert agent.base_prompt == "ROOT IDENTITY"
+    assert agent.system_prompt == "ROOT IDENTITY"
+
+    # An agent with no prompt file falls back to the built-in default.
+    from agent_seed.core import DEFAULT_SYSTEM_PROMPT
+
+    agent.set_agent_name("gamma")
+    assert agent.base_prompt == DEFAULT_SYSTEM_PROMPT
+    assert agent.system_prompt == DEFAULT_SYSTEM_PROMPT
+
+
+def test_agent_switch_identity_enter_agent_still_wins(tmp_path, monkeypatch):
+    # A hook that special-cases the identity in enter_agent runs AFTER the
+    # core's re-seed and must still win — hooks keep full control.
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
+    (tmp_path / "prompt.md").write_text("ROOT IDENTITY\n")
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "alpha" / "prompt.md").write_text("FILE IDENTITY\n")
+    (tmp_path / "alpha" / "a.py").write_text(
+        "from agent_seed.hooks import Hooks, RunContext\n"
+        "def enter_agent(ctx: RunContext) -> None:\n"
+        "    ctx.system_prompt = 'HOOK IDENTITY'\n"
+        "\n"
+        "def make() -> Hooks:\n    return Hooks(enter_agent=enter_agent)\n"
+    )
+    reset_cache()
+
+    client = FakeLLMClient([text_completion("a"), text_completion("b")])
+    agent = Agent(client, ToolRegistry())
+    agent.chat("1")  # a run on the root
+    agent.set_agent_name("alpha")
+    # enter_agent overrode the file's identity — the hook wins over the file.
+    assert agent.base_prompt == "FILE IDENTITY"  # the core re-seeded from the file first
+    assert agent.system_prompt == "HOOK IDENTITY"  # then the hook specialized it
+    # the hook's identity is what the LLM actually sees.
+    agent.chat("2")
+    sent = client.requests[-1]["messages"][0]
+    assert "HOOK IDENTITY" in sent["content"]
+    assert "FILE IDENTITY" not in sent["content"]
+
+
 def test_explicit_hooks_still_win_over_agent_name(tmp_path, monkeypatch):
     monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(tmp_path))
     _root_and_agent(tmp_path)
