@@ -286,12 +286,14 @@ message list through as a clean (deep-copied) list, dropping items that lack a
 This is the direct answer to *"inject clear prompts at the beginning and at
 each cycle."* The beginning is the **identity** (declared once, above). Each
 cycle is the **context + addendum + (optionally) examples** — and you inject
-them per round from a hook:
+them per round from a hook (the *semantics* of why a value set in round N does
+not leak into round N+1 are in [The non-sticky reset](#the-non-sticky-reset-no-accumulation)):
 
 ```python
 def before_llm(ctx: RunContext) -> None:
-    # Re-seed the situation every round from your own source. Non-sticky: a
-    # value you set here applies to THIS round only; next round is re-seeded.
+    # The core re-seeds context/examples/addendum from the agent's baseline
+    # each round, before this hook runs (see "The non-sticky reset").
+    # A value set here applies to THIS round only.
     ctx.context = current_rag_chunk()            # the "situation" this round
     ctx.addendum = "Today is 2026-10-27. Be concise."  # a this-turn note
 
@@ -764,7 +766,12 @@ Use `set_model` for a gated change.
 
 **HTTP/REPL surface.** `POST /config` (session-scoped or global),
 `POST /config/test`, and the REPL's `/model` command (see `protocol.md` for
-shapes).
+shapes). The *wire* contract for these three endpoints — request / response
+bodies, status codes, and the per-session vs. global semantics — lives in
+`[protocol.md](protocol.md)`'s `GET /config` / `POST /config` / `POST /config/test`
+sections; this section is the *hook-side* contract (who may write
+`ctx.current_model`, the veto semantics of `on_model_change`, and the priority
+order).
 
 #### Turn termination
 
@@ -1219,6 +1226,20 @@ def roll_dice(sides: int) -> int:
 ```console
 $ uv run agent-compose casino --tools "calculator,roll_dice"
 ```
+
+**Which `tools.py` is which?** Three files in this repo carry the same
+`enter_agent → ctx.allowed_tools = list(ALLOWED_TOOLS)` pattern, for three
+different jobs — they are siblings, not interchangeable:
+
+| file | role | auto-loaded? |
+|------|------|--------------|
+| `hook_modules/00_tools.py` | the **live** declaration for the main (root) agent — this is what governs it today | yes (it is the main agent's hook) |
+| `experiments/tool_policy.py` | a **portable template** to copy into a named agent's folder (`hook_modules/<n>/tools.py`) | no (never auto-loaded) |
+| `hook_modules/<n>/tools.py` (composed) | the **generated** declaration for a composed agent (whitelist + inlined reservoir tools) | yes, when that agent is selected |
+
+Use the template to hand-write a `tools.py`; use the composer when you want the
+reservoir tools inlined for you. All three resolve to the same strict-whitelist
+semantics described in ["Per-agent tool access"](#per-agent-tool-access-strict-whitelist).
 
 #### Flags
 

@@ -78,7 +78,10 @@ agent's `enter_agent`/`before_llm` may still override or restore.
 
 The supplied fields are merged over the current config. `on_model_change` (a
 hook veto) applies to *live* sessions only — a pending config records the
-request verbatim, since no agent has taken over yet.
+request verbatim, since no agent has taken over yet. The *hook-side* contract —
+who may write the model, the veto/rollback semantics of `on_model_change`, the
+priority order (env < `enter_agent` < `set_model` < `before_llm`), and the
+app-default vs. session distinction — is in `manual.md`, "Model selection".
 
 Status codes:
 
