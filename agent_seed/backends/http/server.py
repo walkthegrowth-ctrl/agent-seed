@@ -207,12 +207,15 @@ def create_app(
             if pending is None:
                 return JSONResponse({"error": f"no such session: {session_id}"}, status_code=404)
             # Session not created yet, but a config was set for it: report it.
-            return JSONResponse(
-                {
-                    "llm": llm_public(pending),
-                    "base": llm_public(sessions.default_llm()),
-                }
-            )
+            # The base is the app default; if that can't be determined (e.g. no
+            # LLM_MODEL and no app default explicitly set), report base: null
+            # rather than a 500 — the caller asked about a known session and
+            # got a valid answer for the pending config.
+            try:
+                base_llm = llm_public(sessions.default_llm())
+            except LLMConfigError:
+                base_llm = None
+            return JSONResponse({"llm": llm_public(pending), "base": base_llm})
         return JSONResponse(
             {
                 "llm": llm_public(agent.context.current_model),
@@ -263,12 +266,29 @@ def create_app(
                 return JSONResponse(
                     {"ok": True, "session_id": body.session_id, "llm": llm_public(effective)}
                 )
-            # No session: become the app default and apply to every live session.
+            # No session: become the app default AND apply to every live session.
+            # Atomic: if any live session's on_model_change vetoes, every live
+            # session is restored to its prior current_model and the app default
+            # is left unchanged (protocol.md: "vetoed → 409"). We apply the
+            # sessions first and commit the app default only if they all accept,
+            # so a partial commit is impossible.
             target = sessions.default_llm()
             effective = merge(target)
+            # Snapshot each live session's prior current_model for rollback.
+            snapshots = [
+                (agent, agent.context.current_model) for agent in sessions._agents.values()
+            ]
+            try:
+                for agent, _ in snapshots:
+                    agent.set_model(effective)  # on_model_change may veto (raise)
+            except Exception:
+                # Restore every session to its pre-loop state. The rejecting
+                # agent's set_model already rolled itself back; the others are
+                # restored here. The app default is NOT committed.
+                for agent, prior in snapshots:
+                    agent.context.current_model = prior
+                raise
             sessions.set_default_llm(effective)
-            for agent in sessions._agents.values():
-                agent.set_model(effective)  # on_model_change may veto (raise)
             return JSONResponse({"ok": True, "llm": llm_public(effective)})
         except LLMConfigError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)

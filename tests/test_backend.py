@@ -860,6 +860,94 @@ def test_config_test_no_base_returns_400_not_fake_default(monkeypatch, tmp_path)
     mp2.undo()
 
 
+def test_config_set_global_hook_veto_returns_409_and_keeps_state(monkeypatch):
+    """POST /config (no session_id) with a veto hook on any live session must
+    return 409, leave every live session unchanged, AND leave the app default
+    unchanged (atomic rollback)."""
+    from agent_seed.hooks import Hooks
+    from tests.conftest import text_completion
+
+    def veto(ctx):
+        raise RuntimeError("policy: no model changes")
+
+    app, _, mp = _make_app([text_completion("hi")], hooks=Hooks(on_model_change=veto))
+    with TestClient(app) as test_client:
+        # Two live sessions so the partial-commit case is actually exercised.
+        with test_client.stream("POST", "/chat", json={"message": "a"}) as response:
+            sid1 = response.headers["x-session-id"]
+        with test_client.stream("POST", "/chat", json={"message": "b"}) as response:
+            sid2 = response.headers["x-session-id"]
+
+        # Global set (no session_id) must be vetoed.
+        response = test_client.post("/config", json={"model": "global-x"})
+        assert response.status_code == 409
+        assert "policy" in response.json()["error"]
+
+        # Both live sessions are unchanged.
+        for sid in (sid1, sid2):
+            got = test_client.get("/config", params={"session_id": sid})
+            assert got.json()["llm"]["model"] == "test-model"
+
+        # The app default is unchanged (not committed).
+        got_global = test_client.get("/config")
+        assert got_global.json()["llm"]["model"] == "test-model"
+    mp.undo()
+
+
+def test_config_test_with_session_id_uses_session_as_merge_base(monkeypatch):
+    """POST /config/test with a session_id uses the session's current model as
+    the merge base, so the candidate (body has no model) reflects the session's
+    model, not the app default."""
+    from tests.conftest import text_completion
+
+    app, _, mp = _make_app([text_completion("hi")])
+    monkeypatch.setattr(
+        "agent_seed.core.OpenAICompatClient",
+        _probe_client_factory(lambda self: text_completion("ok")),
+    )
+    with TestClient(app) as test_client:
+        # Create a session and switch its model.
+        with test_client.stream("POST", "/chat", json={"message": "a"}) as response:
+            sid = response.headers["x-session-id"]
+        resp = test_client.post("/config", json={"session_id": sid, "model": "session-model"})
+        assert resp.status_code == 200
+
+        # Probe with session_id (no model in body): the merge base is the
+        # session's "session-model", so the candidate model is "session-model".
+        # (If the base were the app default "test-model", it would be "test-model".)
+        resp = test_client.post("/config/test", json={"session_id": sid})
+        assert resp.status_code == 200
+        assert resp.json()["model"] == "session-model"
+    mp.undo()
+
+
+def test_config_get_pending_session_with_no_base_returns_base_null(monkeypatch, tmp_path):
+    """GET /config for a pending session when the app default cannot be
+    determined (LLM_MODEL unset, no explicit app default) must return 200
+    with base=null, not 500."""
+    from tests.conftest import text_completion
+
+    app, _, mp = _make_app([text_completion("hi")])
+    with TestClient(app) as test_client:
+        # Record a pending config (LLM_MODEL is set by _make_app so default_llm works).
+        r = test_client.post("/config", json={"session_id": "X", "model": "x-model"})
+        assert r.status_code == 200
+
+        # Now make the app default un-determinable.
+        mp.delenv("LLM_MODEL", raising=False)
+        mp.chdir(tmp_path)
+        mp.setattr("agent_seed.llm.load_dotenv", lambda *a, **k: False)
+
+        # The pending GET must still be 200 (the pending config is valid) and
+        # base must be null (no base to report), not a 500.
+        got = test_client.get("/config", params={"session_id": "X"})
+        assert got.status_code == 200
+        data = got.json()
+        assert data["llm"]["model"] == "x-model"
+        assert data["base"] is None
+    mp.undo()
+
+
 def test_pending_config_survives_unrelated_chat(monkeypatch, tmp_path):
     """A config set for session ``X`` before X's first /chat is 'pending'.
     Chats for a *different* session (``Y``) must not consume or clobber it;
