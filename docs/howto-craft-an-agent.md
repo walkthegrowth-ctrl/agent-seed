@@ -75,7 +75,7 @@ agent is*.
    > How does this work? An agent folder is "replacing" the default agent for the
    > time that agent is selected, and its `prompt.md` becomes the instructions it
    > starts every conversation with. Details: [manual — "The four channels"]
-   > (/manual.md#the-four-channels).
+    > (manual.md#the-four-channels).
 
 ---
 
@@ -119,7 +119,7 @@ add one small file so it may use the built-in `calculator`.
    > Why does a tool need a whole file? "Allowing a tool" is a rule that runs the
    > moment the agent takes the stage; this system's rule mechanism is the "hook".
    > Details: [manual — "Per-agent tool access (strict whitelist)"]
-   > (/manual.md#per-agent-tool-access-strict-whitelist).
+   > (manual.md#per-agent-tool-access-strict-whitelist).
 
 ---
 
@@ -160,7 +160,7 @@ That's a hook. It's just a few lines that run at the end of every answer.
 
    > A "hook" is a fixed point the system calls at a moment (before it answers,
    > here) where you may tuck in a little bit of behavior. Details: [manual —
-   > "The full list of hooks (reference)"](/manual.md#the-full-list-of-hooks-reference).
+   > "The full list of hooks (reference)"](manual.md#the-full-list-of-hooks-reference).
 
 ---
 
@@ -237,15 +237,15 @@ rules.** When you want more, each has a one-line entry point:
 
 - **More behavior rules** — any of the named "hooks" (`before_llm`,
   `after_tool_call`, a budget meter, …). The full list, in plain terms:
-  [manual — "Which hook to use, by goal"](/manual.md#which-hook-to-use-by-goal).
+  [manual — "Which hook to use, by goal"](manual.md#which-hook-to-use-by-goal).
 - **More prompt nuance** — per-round context, few-shot examples.
-  [manual — "Prompting — the content layer"](/manual.md#prompting--the-content-layer).
+  [manual — "Prompting — the content layer"](manual.md#prompting--the-content-layer).
 - **Writing your own tool** (a new capability) in Python.
-  [manual — "Adding tools"](/manual.md#adding-tools).
+  [manual — "Adding tools"](manual.md#adding-tools).
 - **Choosing which model it uses.** [manual — "Model selection"]
-  (/manual.md#model-selection-dynamic-sticky).
+  (manual.md#model-selection-dynamic-sticky).
 - **Several agents at once.** Each is just another folder under `hook_modules/`;
   switch between them with `/agent`. [manual — "Agents: hook subdirectories"]
-  (/manual.md#agents-hook-subdirectories).
+  (manual.md#agents-hook-subdirectories).
 
 The full user manual is [`docs/manual.md`](manual.md).

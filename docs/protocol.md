@@ -92,15 +92,18 @@ Status codes:
 ## `POST /config/test`
 
 Probe a candidate LLM config (one minimal ping completion) without persisting
-it. Body is the same partial shape as `POST /config` minus `session_id`:
+it. Body is the same partial shape as `POST /config` (any subset of
+`model` / `base_url` / `api_key` / `timeout`); a `session_id` may be supplied
+and is used to pick the merge base:
 
 ```json
-{ "model": "candidate-model", "base_url": "http://..." }
+{ "session_id": "<optional>", "model": "candidate-model", "base_url": "http://..." }
 ```
 
-Fields are merged over the app default. This is a diagnostic: it does **not**
-go through `on_model_change` (a probe failing is a finding, not a change — use
-`POST /config` for a gated change).
+Fields are merged over the most specific base available — the session's current
+(or pending) model if a `session_id` is supplied, else the app default. This is
+a diagnostic: it does **not** go through `on_model_change` (a probe failing is
+a *finding*, not a change — use `POST /config` for a gated change).
 
 `200` — the probe ran to completion. Body carries `ok` (the finding):
 
@@ -189,21 +192,36 @@ Query parameters (all optional):
   deterministic scratch view, resolved from the selected agent's declared
   baselines (its hook folder's `prompt.md` / `context.md` / `examples.jsonl`).
 
-Response shape:
+Response shape (scratch, the default — `live` omitted or false):
 
 ```json
 {
   "agent_name": "alpha",           // null for the default agent
-  "session_id": "<id>",            // present only when live=true with session_id
-  "live": false,                   // live=true means "from that session's last turn"
+  "live": false,                   // scratch view
   "identity": "You are alpha.",    // the resolved identity (prompt.md or Hooks.prompt or default)
   "context": "state=on",           // the per-round context block (context.md baseline or null)
-  "addendum": null,                // the per-turn addendum (live only; null in scratch)
+  "addendum": null,                // the per-turn addendum (live only; always null in scratch)
   "examples": [                    // the few-shot message list (canonical role/content shape)
     { "role": "user", "content": "e1" },
     { "role": "assistant", "content": "a1" }
   ],
   "system": "You are alpha.\n\nstate=on"   // compose_system(identity, context, addendum)
+}
+```
+
+Response shape (live — `live=true` with a `session_id`): the session's
+last composed value, including any `before_llm` hook adjustments:
+
+```json
+{
+  "agent_name": "alpha",
+  "session_id": "0f3a…",           // present only for live=true
+  "live": true,
+  "identity": "You are alpha.",
+  "context": "state=on",
+  "addendum": "round-note",        // the last round's hook-set addendum (null if none)
+  "examples": [ /* same shape as scratch */ ],
+  "system": "You are alpha.\n\nstate=on\n\nround-note"
 }
 ```
 

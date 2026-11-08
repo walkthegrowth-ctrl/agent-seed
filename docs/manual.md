@@ -43,6 +43,8 @@ Companion documents:
     - [`RunContext` reference](#runcontext-reference)
     - [`extras`: the walls](#extras-the-walls)
     - [System prompt (dynamic, sticky)](#system-prompt-dynamic-sticky)
+    - [Model selection (dynamic, sticky)](#model-selection-dynamic-sticky)
+    - [Turn termination](#turn-termination)
   - [Hook modules and the two folders](#hook-modules-and-the-two-folders)
   - [Promoting experiments](#promoting-experiments)
     - [The contract: `make()`](#the-contract-make)
@@ -740,6 +742,24 @@ Use `set_model` for a gated change.
 **HTTP/REPL surface.** `POST /config` (session-scoped or global),
 `POST /config/test`, and the REPL's `/model` command (see `protocol.md` for
 shapes).
+
+#### Turn termination
+
+The final two hooks of a turn, `prepare` and then `finish`, fire *after* the LLM
+has produced its final text — `ctx.final_answer` is set (to the LLM's content)
+before `prepare` runs, and `finish` is the last hook that can rewrite it. The
+result is what the backend returns / streams as the turn's answer, and the value
+is recorded as an `assistant` message in `agent.history`.
+
+Typical uses:
+
+* **`prepare`** — validate / normalize the final answer (trim, format, sanitize)
+  before it is recorded.
+* **`finish`** — transform the final answer (e.g. append a sign-off, add a
+  footer, apply a persona's closing line).
+
+See `experiments/ahem.py` for the canonical `finish` pattern, and the
+["Worked examples"](#worked-examples) section for more.
 
 ### Hook modules and the two folders
 

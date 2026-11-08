@@ -60,6 +60,8 @@ All config is via environment variables (see `.env.example`):
 | `AGENT_SERVER_HOST` | `127.0.0.1` | bind host for the backend |
 | `AGENT_SERVER_PORT` | `8787` | bind port for the backend |
 | `HOOKS_ROOT` | `hook_modules` | hooks folder (root agent); agent subdirs live under it |
+| `TOOLS_ROOT` | `tools` | the `tools/` "reservoir" folder `agent compose --tools` scans (ast, never imported at scan time) |
+| `AGENT_BACKEND_URL` | `http://127.0.0.1:8787` | the backend base URL the REPL `agent-repl` talks to (also settable via `--url`) |
 
 Note: there is no `LLM_TIMEOUT` env var; the client uses a 120 s default.
 Change it at runtime with `POST /config` (the body accepts a `timeout`
@@ -176,7 +178,12 @@ tests/
   test_composer_generator.py  pure generator (name, channels, write_plan, --force)
   test_composer_catalog.py    tool catalog: built-ins + tools/ reservoir (ast scan)
   test_composer_e2e.py        a composed agent folder is discoverable + its tool callable
-  e2e/                    e2e support: scripted LLM server (ThreadingHTTPServer) + pty REPL driver
+  test_composer_cli.py        the `agent compose` CLI surface (--list-tools, --dry-run, reserved-name)
+  test_composer_interactive.py  the `agent compose` wizard driven over a real pty (full walk, re-prompts, clean errors)
+  test_composer_values.py     pure value semantics of the composer CLI helpers (unquote, parse_tools, role validation)
+  test_prompting.py           the prompt layer (compose_system, normalize_examples, compose_prompt) + core wiring
+  test_memory.py              the durable-memory experiment (SQLite store, FTS/LIKE search, summarizer, hermetic LLM stub)
+  e2e/                      e2e support: scripted LLM server (ThreadingHTTPServer) + pty REPL/composer drivers
 ```
 
 ## Design notes

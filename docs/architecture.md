@@ -23,6 +23,9 @@ and the whole system can be explained on one page.
 │  tools.py           registry + schema gen + calculator tool   │
 │  prompting.py       compose identity/context/examples/addendum│
 │                     into the round's messages (default render)│
+│  composer/          `agent compose`: Spec → Plan → write      │
+│   - tool catalog (built-in registry + tools/ "reservoir")     │
+│   - no-code agent-folder generator (voice/tools/context/...)  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
