@@ -59,6 +59,7 @@ Companion documents:
     - [What it creates](#what-it-creates)
     - [The tool reservoir](#the-tool-reservoir)
     - [Flags](#flags)
+    - [The interactive wizard](#the-interactive-wizard)
     - [Removing a composed agent](#removing-a-composed-agent)
   - [Which hook to use, by goal](#which-hook-to-use-by-goal)
   - [Worked examples](#worked-examples)
@@ -360,9 +361,13 @@ curl 'http://127.0.0.1:8787/prompt?agent_name=alpha'
 curl 'http://127.0.0.1:8787/prompt?session_id=<id>&live=true'   # what it just sent
 ```
 
-It is read-only (no hooks fired, no LLM call, no mutation), and it mirrors
-`GET /tools?agent_name=…` in spirit: it resolves the *agent's* declared content
-against a scratch run-context.
+With `live=true` and a `session_id` it returns the session's **last composed**
+values instead (the sticky identity a hook may have set, plus that round's
+context / examples / addendum) — i.e. what the core *just* sent, including any
+`before_llm` adjustments. Default (`live` omitted) is the deterministic scratch
+view above. It is read-only (no hooks fired, no LLM call, no mutation), and it
+mirrors `GET /tools?agent_name=…` in spirit: it resolves the *agent's* declared
+content against a scratch run-context.
 
 ---
 
@@ -734,6 +739,24 @@ def enter_agent(ctx: RunContext) -> None:
     ctx.current_model = LLMConfig(base_url="http://...", model="qwen3:32b")
 ```
 
+**App-default vs. session model.** `ctx.current_model` is *per session* (per
+`Agent`). There is a second, app-level value — the **app default** — held by the
+backend's session store: it is what *new* sessions start from, and what
+`POST /config` with **no** `session_id` updates (it becomes the new app default
+*and* is applied to every live session). A `POST /config` **with** a
+`session_id` changes only that session. Priority for a given session is the
+same as above (its own `current_model` wins); `base` in `GET /config` reports
+the session's immutable starting config, not the app default.
+
+**Pending configs (set before the first `POST /chat`).** Frontends mint a
+`session_id` up front, so a `POST /config` can legitimately arrive *before* the
+session's first `POST /chat`. For a session that is not yet created, the config
+is stored as **pending** and the session adopts it as its base the moment it is
+created; the active agent's `enter_agent` / `before_llm` may still override or
+restore after. A `GET /config?session_id=…` on a pending session reports the
+pending config (and the app default as `base`). This is what lets `/model <n>`
+work immediately after the REPL starts, before any message is sent.
+
 **`Agent.test_model(cfg)`** runs one minimal ping completion (`max_tokens=1`)
 with a throwaway client and returns an `LLMProbe(ok, error, latency_ms,
 usage)`. It is a diagnostic: a probe failure is a *finding*, not a *change*.
@@ -894,9 +917,15 @@ is `rm hook_modules/memory.py` (drop the tool name to fully remove the tool).
 - Store: SQLite at `./agent_memory/<agent>.db` (one file per agent), overridden
   by `$MEMORY_ROOT`. One row per committed turn; a per-session rolling summary
   with a `last_seq` watermark.
-- `MEMORY_SUMMARY_WHEN` (`finish` default · `ready` · `both`),
-  `MEMORY_SUMMARY_MODEL` (point the fold at a cheaper model),
-  `MEMORY_MAX_SUMMARY_CHARS` (cap the previous summary folded in).
+- `MEMORY_SUMMARY_WHEN` — **when** the rolling summary is refolded: `finish`
+  (the default — after the turn is committed) or `ready` (when the session
+  (re)establishes) or `both`.
+- `MEMORY_SUMMARY_MODEL` — an optional model name for the summary LLM call
+  (default: the session's current model); handy to point the fold at a cheaper
+  model.
+- `MEMORY_MAX_SUMMARY_CHARS` — cap on the length of the *previous* summary that
+  is folded into the next (default ~600 chars); bounds the prompt, not the cost,
+  of each fold.
 - **`POST /reset` does not clear memory** (that is the point); delete the `.db`
   to wipe an agent's memory.
 
@@ -926,6 +955,14 @@ The rules:
   subdirectory.
 * **Fallback.** An `agent_name` with no matching subdirectory (or `None`)
   uses the root `hook_modules/`.
+* **`default` is reserved for the main agent.** `agent_name="default"` always
+  resolves to the root — it is *never* a literal folder. Switch back to the main
+  agent with `default` (the REPL's `/agent default`) or by omitting the name;
+  `agent_name=None` is the same agent. A stray `hook_modules/default/` folder is
+  anomalous (it was created before the reservation, or by hand): it is excluded
+  from `GET /agents` and the composer refuses to compose `default` and warns when
+  it scans one — rename or delete it. See `RESERVED_AGENT_NAME` in
+  `agent_seed/discovery.py`.
 * **Traversal is rejected.** Names that would escape the root (`..`,
   absolute paths) fall back to the root.
 * **Root location.** The search starts at `hook_modules/` relative to the
@@ -1200,6 +1237,30 @@ $ uv run agent-compose casino --tools "calculator,roll_dice"
 
 In an interactive terminal (no flags) `agent compose` prompts you, one short
 question per channel; pass flags for scripting.
+
+#### The interactive wizard
+
+Run `agent compose` with no arguments and it walks you through six prompts, in
+this order. Each optional prompt defaults to empty ("none"); a blank answer
+skips that channel. Bad values re-prompt in place (the wizard does *not* advance
+to the next question with an invalid answer):
+
+1. **agent name** — required; re-prompts until it passes the name rule
+   (`[a-z0-9_-]+`, no slashes/dots, not `default`).
+2. **voice / persona** → `prompt.md`.
+3. **tools** (comma-separated) → `tools.py`; a hint shows the available names;
+   an unknown name re-prompts.
+4. **context block** → `context.md`.
+5. **examples** (`role=content` pairs, `|`-separated) → `examples.jsonl`; an
+   invalid role re-prompts.
+6. **sign-off line** → `sign.py`.
+
+Quoted (`'x'`) and unquoted (`x`) answers both produce the same file content —
+one layer of matching surrounding quotes is peeled off, anything else is kept as
+typed. A spec with *no* channels at all writes a neutral **skeleton** folder
+(empty text files, a no-op `tools.py`/`sign.py` stub wired to the right hook
+slots, and a `README.md`) so you always get a loadable, editable starting point
+rather than a blank folder.
 
 #### Removing a composed agent
 

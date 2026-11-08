@@ -92,13 +92,15 @@ uv run agent-compose tutor --voice "You are a patient math tutor." --tools calcu
 
 See `docs/howto-craft-an-agent.md` for the step-by-step walk-through.
 
-REPL commands: `/help`, `/reset` (clear server-side session), `/tools`,
-`/usage` (session token usage), `/agent [name]` / `/agents` (switch / list
-agents), `/model` (show the session's LLM config), `/model <name>` (probe-then-switch),
-`/model test <name>` (probe without switching), `/model force <name>` (switch
-without a probe), `/quit` (or `/exit`). Type `/` alone to
-open a multi-line block (close with `/` and Enter). Type `/quit` or press
-`Ctrl-D` to exit.
+REPL commands (type `/help` for the full, aligned list): `/reset` (clear
+server-side session), `/tools` (list tools), `/usage` (session token total;
+`/usage on|off|toggle` switches the per-turn report line, on by default),
+`/agent [name]` (switch agent; `/agent default` returns to the main agent) and
+`/agents` (list them), `/model` (show the session's LLM config),
+`/model <name>` (probe-then-switch), `/model test <name>` (probe without
+switching), `/model force <name>` (switch without a probe), `/quit` (or
+`/exit`). Type `/` alone to open a multi-line block (close with `/` + Enter).
+`Ctrl-D` also exits.
 
 ### Example
 
