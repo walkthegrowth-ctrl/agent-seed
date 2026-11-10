@@ -210,7 +210,7 @@ four pieces instead of hand-rolling a sticky string.
 |---|---|---|---|---|
 | **identity** | who the agent is (persona, role) | sticky for the run; immutable reference `ctx.base_prompt` | `Agent(system_prompt=…)` > the agent's `prompt.md` (`Hooks.prompt`) > built-in default | carried in `ctx.system_prompt`; `before_llm` may specialize it |
 | **context** | the *situation* this round (RAG chunks, date, current state) | **per-round, non-sticky** | the agent's `context.md` (`Hooks.context`) baseline | core seeds `ctx.context` from the baseline each round; `before_llm` may replace it; folded into the system message |
-| **examples** | few-shot demonstrations of desired behaviour | **per-round, non-sticky** | the agent's `examples.jsonl` (`Hooks.examples`) baseline | core seeds `ctx.examples` from the baseline each round; composed as message pairs between system and history |
+| **examples** | few-shot demonstrations of desired behaviour | **per-round, non-sticky** | the agent's `examples.jsonl` (`Hooks.examples`) baseline | core seeds `ctx.examples` from the baseline each round; `before_llm` may replace it (spliced between the system message and the hook's `ctx.messages` zone) |
 | **addendum** | a short *this-turn* note ("be especially careful") | **per-round, non-sticky** | set by a hook each round in `before_llm` | folded into the system message, last |
 
 Only **identity** is sticky across turns (it is the run's established prompt,
@@ -281,6 +281,16 @@ core sent before this layer existed. And `normalize_examples` passes the declare
 message list through as a clean (deep-copied) list, dropping items that lack a
 `role` — it never loses the tool_call/tool/result shape.
 
+In the live loop the core builds this in two stages so a hook's write to the
+canonical fields is honored: **before** `before_llm` it lays down
+`[system, *history]` (examples not yet spliced); **after** `before_llm` it
+rebuilds the system message from the (possibly hook-changed) `system_prompt` /
+`context` / `addendum` and splices `normalize_examples(ctx.examples)` between
+the system message and `ctx.messages[1:]` — the hook's `ctx.messages` zone. The
+final order the model sees is therefore still the three stages above, with the
+examples honoring whatever `ctx.examples` is at hook time (see "The hooks keep
+full control").
+
 ### Injecting prompt content at each cycle
 
 This is the direct answer to *"inject clear prompts at the beginning and at
@@ -296,13 +306,15 @@ def before_llm(ctx: RunContext) -> None:
     # A value set here applies to THIS round only.
     ctx.context = current_rag_chunk()            # the "situation" this round
     ctx.addendum = "Today is 2026-10-27. Be concise."  # a this-turn note
+    ctx.examples = pick_examples_for(today)      # few-shot, honored this round
 
 hooks = Hooks(before_llm=before_llm)
 ```
 
 Because `ctx.context` and `ctx.addendum` fold into the single system message
-after `before_llm`, and `ctx.messages` is your message zone, you can also inject
-a full per-round block (the established escape hatch at
+after `before_llm`, `ctx.examples` is spliced between the system message and the
+rest of `ctx.messages` after `before_llm`, and `ctx.messages` is your message
+zone, you can also inject a full per-round block (the established escape hatch at
 `test_hooks.py::test_before_llm_injection_is_per_request_not_history`):
 
 ```python
@@ -343,14 +355,16 @@ hooks win:
 |---|---|
 | sets `ctx.system_prompt` in `before_llm` | it overrides the declared identity on the wire (and stays sticky) |
 | sets `ctx.context` / `ctx.addendum` | it replaces that round's baseline for the system message |
+| sets `ctx.examples` | replaces that round's baseline few-shot messages (spliced in after `before_llm`) |
 | edits `ctx.messages` directly | it is the hook's message zone — append, replace, or reorder freely |
-| sets `ctx.examples` | composes for that round |
 | wants the pre-layer behaviour | set nothing; the identity-only path is byte-identical |
 
-The three **system-block** sections (identity, context, addendum) are the core's
-canonical channel (re-applied to `messages[0]` after `before_llm`); the
-**examples** and any free-form context blocks live in `ctx.messages` (the hook's
-zone, applied at compose time). That is the whole division of labour.
+The three **system-block** sections (identity, context, addendum) and the
+**examples** list are the core's canonical channels: they are read **after**
+`before_llm` and folded into the final message list (the system into `messages[0]`,
+the examples spliced between it and the hook's `ctx.messages` zone). A hook's
+edits to `ctx.messages` (the message zone) are preserved. That is the whole
+division of labour.
 
 ### Reading the composed prompt (`GET /prompt`)
 
@@ -436,7 +450,7 @@ all the rest fire inside `chat()`.
 | `ready_run` | right after `initialize_run` (run guaranteed) | core, on need | active agent | read `run_id`, `extras` | once per (re)establishment | attach budget / memory |
 | `initialize_session` | first `chat()`, `set_session`, and after any switch | core / caller on session change | active agent | may set `session_id` | on each session (re)establishment | seed / migrate per-session state |
 | `ready_session` | right after `initialize_session` (session guaranteed) | core / caller on session change | active agent | read `session_id`, `extras` | on each session (re)establishment | load per-session external context |
-| `before_llm` | every `tool_loop_round`, before each LLM call | core | active agent | `messages`, `tools`, `system_prompt` | per request only (rebuilt) | inject RAG/context/date, gate tools |
+| `before_llm` | every `tool_loop_round`, before each LLM call | core | active agent | `messages`, `tools`, `system_prompt`, `context`, `addendum`, `examples` (all honored after this hook) | per request only (rebuilt) | inject RAG/context/date, swap few-shot examples, gate tools |
 | `before_tool_call` | every tool call | core | active agent | `tool_call` (may rewrite/`None`) | `None` records a `"skipped by policy"` tool result | rewrite args, veto by policy |
 | `after_tool_call` | after a successful tool exec | core | active agent | `tool_result` | fires only on success | redact / rewrite result |
 | `on_round` | end of each `tool_loop_round` | core | active agent | any (read / `extras`) | fire-only, no required return | tracing / metrics |
@@ -546,8 +560,11 @@ chat() begins  (turn N of the run)
  │   [core rebuilds ctx.messages from ctx.system_prompt + history;
  │    rebuilds ctx.tools from the registry ∩ ctx.allowed_tools (strict whitelist);
  │    sets ctx.tool_loop_round]
- │   ├─ before_llm(ctx)               # may rewrite ctx.messages / ctx.tools / ctx.system_prompt / ctx.allowed_tools
- │   [core applies ctx.system_prompt to messages[0]; sends the LLM request]
+  │   ├─ before_llm(ctx)               # may rewrite ctx.messages / ctx.tools / ctx.system_prompt / ctx.allowed_tools / ctx.examples
+  │   [core rebuilds messages[0] from system_prompt/context/addendum and
+  │    splices normalize_examples(ctx.examples) between messages[0] and
+  │    messages[1:] (the hook's ctx.messages zone is preserved); sends the LLM
+  │    request]
  │   │   if the LLM returns tool_calls:
  │   │     └─ per tool call:
  │   │         ├─ [core gate: is ctx.allowed_tools set AND does it contain

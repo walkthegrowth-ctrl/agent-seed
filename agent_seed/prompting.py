@@ -68,6 +68,16 @@ def compose_prompt(
     When context, examples, and addendum are all empty the result is exactly
     ``[{"role":"system","content":system_prompt}, *history]`` — i.e. identical
     to what the core sent before this layer existed (backward compatible).
+
+    In the live ``Agent.chat`` loop the core does **not** call this function:
+    it lays down ``[system, *history]`` *before* ``before_llm`` so the hook can
+    edit ``ctx.messages`` (its zone), then *after* ``before_llm`` it rebuilds
+    the system message from the (possibly hook-changed) canonical fields and
+    splices ``normalize_examples(ctx.examples)`` between the system message and
+    ``ctx.messages[1:]`` — giving ``ctx.examples`` the same post-hook semantics
+    as ``ctx.context`` / ``ctx.addendum``. This function renders the same final
+    shape and is used by the ``MAX_TOOL_ROUNDS`` forced-final fallback and as a
+    standalone utility (e.g. tests, scripts).
     """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": compose_system(system_prompt, context, addendum)}

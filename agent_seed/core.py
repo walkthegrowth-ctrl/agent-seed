@@ -16,6 +16,7 @@ LLM call from the current history.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 import uuid
@@ -424,17 +425,25 @@ class Agent:
             ctx.examples = normalize_examples(self.hooks.examples)
             ctx.addendum = None
             # Per-request working state, rebuilt from the current session
-            # history. compose_prompt renders system (identity + context +
-            # addendum) -> examples -> history. ``before_llm`` may override the
-            # canonical fields (ctx.system_prompt / ctx.context / ctx.examples /
-            # ctx.addendum) or touch ctx.messages directly (escape hatch).
-            ctx.messages = compose_prompt(
-                ctx.system_prompt,
-                self.history,
-                ctx.context,
-                ctx.examples,
-                ctx.addendum,
-            )
+            # history. The messages list is built in two stages so that the
+            # three canonical channels (system_prompt / context / addendum)
+            # AND ctx.examples are all honored after before_llm (symmetric
+            # behavior):
+            #   - BEFORE before_llm: [system, *history]. ctx.examples is
+            #     *not* spliced in yet — it lives only in ctx.examples.
+            #   - AFTER before_llm: the fresh system message is rebuilt from
+            #     the canonical fields, ctx.examples is spliced between it
+            #     and ctx.messages[1:] (deep-copied), and everything the hook
+            #     did to ctx.messages[1:] is preserved (the hook's zone).
+            # This keeps the documented escape hatch (ctx.messages.append /
+            # .insert / full replace) intact while giving ctx.examples the
+            # same post-hook semantics as ctx.context / ctx.addendum.
+            ctx.messages = [
+                {
+                    "role": "system",
+                    "content": compose_system(ctx.system_prompt, ctx.context, ctx.addendum),
+                }
+            ] + [copy.deepcopy(m) for m in self.history]
             # Offer only what the active agent's whitelist allows (strict).
             # None/[] -> no tools offered. ``before_llm`` may still adjust
             # ``ctx.tools`` afterwards (existing escape hatch) or change
@@ -442,14 +451,17 @@ class Agent:
             # the execute-path veto) — see ``docs/manual.md``.
             ctx.tools = self.registry.schemas_for(ctx.allowed_tools)
             call_hook(self.hooks.before_llm)
-            # The canonical system-channel fields (system_prompt / context /
-            # addendum) are applied to the first message after before_llm, so a
-            # hook that rewrote them is reflected here (compose_system folds
-            # them, dropping empties). A hook that edited messages[0] directly
-            # is overwritten — the canonical channel is ctx.system_prompt + the
-            # per-round fields.
-            ctx.messages[0]["content"] = compose_system(
-                ctx.system_prompt, ctx.context, ctx.addendum
+            # Splice ctx.examples (deep-copied) between the fresh system
+            # message and the hook's zone (ctx.messages[1:]), then rebuild the
+            # system message from the canonical fields (so a hook's rewrite
+            # of system_prompt / context / addendum is reflected — the same
+            # guarantee the previous single re-apply gave for those three
+            # channels). The hook's edits to ctx.messages[1:] are preserved.
+            fresh_system = compose_system(ctx.system_prompt, ctx.context, ctx.addendum)
+            ctx.messages = (
+                [{"role": "system", "content": fresh_system}]
+                + normalize_examples(ctx.examples)
+                + ctx.messages[1:]
             )
 
             completion = self.client.chat(

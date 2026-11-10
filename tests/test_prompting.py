@@ -217,8 +217,9 @@ def test_addendum_from_before_llm_renders_last_into_system_message():
 def test_before_llm_can_inject_examples_via_message_zone():
     """Dynamic per-cycle examples injection goes through ctx.messages (the hook
     zone), consistent with the existing test_before_llm_injection_is_per_request_not_history.
-    The ctx.examples field is a compose-time input (read at composition); for
-    per-round example tweaks, manipulate ctx.messages directly.
+    A hook that appends / inserts into ctx.messages preserves those edits — see
+    the A1-splice tests below for the symmetric path of setting ctx.examples
+    directly.
     """
 
     def inject(ctx: RunContext) -> None:
@@ -241,6 +242,117 @@ def test_before_llm_can_inject_examples_via_message_zone():
     ]
     # None of the injected messages are in the stored history.
     assert not any(m.get("content") == "injected-example-q" for m in agent.history)
+
+
+def test_before_llm_can_set_ctx_examples():
+    """A1 fix: setting ``ctx.examples`` in ``before_llm`` now takes effect —
+    symmetric with ctx.context / ctx.addendum (spliced in after the hook runs).
+    """
+
+    def new_examples(ctx: RunContext) -> None:
+        ctx.examples = [
+            {"role": "user", "content": "hook-q"},
+            {"role": "assistant", "content": "hook-a"},
+        ]
+
+    hooks = Hooks(before_llm=new_examples)
+    client = FakeLLMClient([text_completion("ok")])
+    agent = Agent(client, ToolRegistry(), hooks=hooks)
+    agent.chat("q")
+    sent = client.requests[0]["messages"]
+    # system, then the hook's examples pair, then the history user message.
+    assert [m.get("content") for m in sent] == [
+        sent[0]["content"],
+        "hook-q",
+        "hook-a",
+        "q",
+    ]
+    # And the spliced examples do NOT leak into the stored history.
+    assert not any(m.get("content") == "hook-q" for m in agent.history)
+
+
+def test_before_llm_context_examples_addendum_all_settable_together():
+    """A1 fix: all three canonical channels AND the hook zone can be set in
+    the same ``before_llm`` and are honored in the documented order:
+    system (with ctx + addendum folded in) → ctx.examples → hook zone → history.
+    """
+
+    def set_all(ctx: RunContext) -> None:
+        ctx.context = "round-ctx"
+        ctx.addendum = "note"
+        ctx.examples = [
+            {"role": "user", "content": "e-q"},
+            {"role": "assistant", "content": "e-a"},
+        ]
+        # A hook-zone edit as well.
+        ctx.messages.append({"role": "user", "content": "hook-zone"})
+
+    hooks = Hooks(before_llm=set_all)
+    client = FakeLLMClient([text_completion("ok")])
+    agent = Agent(client, ToolRegistry(), hooks=hooks)
+    agent.chat("q")
+    sent = client.requests[0]["messages"]
+    # system (ctx + addendum folded), then the spliced baseline examples, then
+    # the hook's zone in original order (history "q" followed by the appended
+    # "hook-zone", since the hook appended it after q).
+    assert "round-ctx" in sent[0]["content"]
+    assert "note" in sent[0]["content"]
+    contents = [m.get("content") for m in sent]
+    assert contents[1:] == ["e-q", "e-a", "q", "hook-zone"]
+    # The hook-zone and the spliced examples are NOT in history.
+    assert not any(m.get("content") in ("hook-zone", "e-q", "e-a") for m in agent.history)
+
+
+def test_before_llm_clearing_ctx_examples_drops_baseline():
+    """A1 fix: ``ctx.examples = []`` in ``before_llm`` clears the baseline
+    (the non-sticky reset still works — the round's examples are gone).
+    """
+
+    def clear(ctx: RunContext) -> None:
+        ctx.examples = []
+
+    hooks = Hooks(
+        examples=[
+            {"role": "user", "content": "BASE-Q"},
+            {"role": "assistant", "content": "BASE-A"},
+        ],
+        before_llm=clear,
+    )
+    client = FakeLLMClient([text_completion("ok")])
+    agent = Agent(client, ToolRegistry(), hooks=hooks)
+    agent.chat("q")
+    sent = client.requests[0]["messages"]
+    # system, then the history user "q" — no baseline examples spliced in.
+    assert [m.get("content") for m in sent] == [sent[0]["content"], "q"]
+
+
+def test_ctx_examples_spliced_between_system_and_hook_zone():
+    """A1 fix: pin the exact ordering when a hook both sets ctx.examples and
+    inserts into the hook zone — the spliced window goes between the fresh
+    system message and the hook's edits.
+    """
+
+    def both(ctx: RunContext) -> None:
+        ctx.examples = [
+            {"role": "user", "content": "set-q"},
+            {"role": "assistant", "content": "set-a"},
+        ]
+        ctx.messages.insert(1, {"role": "user", "content": "hook-injected"})
+
+    hooks = Hooks(before_llm=both)
+    client = FakeLLMClient([text_completion("ok")])
+    agent = Agent(client, ToolRegistry(), hooks=hooks)
+    agent.chat("q")
+    sent = client.requests[0]["messages"]
+    # system, set-q, set-a, hook-injected, q (the hook-zone edit is preserved
+    # after the spliced examples).
+    assert [m.get("content") for m in sent] == [
+        sent[0]["content"],
+        "set-q",
+        "set-a",
+        "hook-injected",
+        "q",
+    ]
 
 
 def test_before_llm_can_replace_ctx_system_prompt():

@@ -29,8 +29,10 @@ Two things are defined here:
   - *per-request* fields are rebuilt by the core on each LLM call:
     ``messages``, ``tools``, ``tool_loop_round``, and the per-round prompting
     inputs ``context`` / ``examples`` / ``addendum`` (seeded from the active
-    agent's baseline each round, then ``before_llm`` may adjust them — see
-    :mod:`agent_seed.prompting`).
+    agent's baseline each round, then ``before_llm`` may adjust them — the core
+    honors those post-hook values: ``context`` / ``addendum`` are folded into the
+    system message and ``examples`` are spliced between it and the hook's
+    ``messages`` zone, see :mod:`agent_seed.prompting`).
     - *per-call* fields are set for each tool call or turn:
      ``tool_call``, ``tool_result``, ``final_answer``, ``turn_usage``.
 
@@ -141,7 +143,9 @@ class RunContext:
     # accumulate across rounds. See agent_seed/prompting.py and
     # docs/manual.md "Prompting".
     context: str | None = None  # per-round context block (e.g. RAG, date, state)
-    examples: list[dict[str, Any]] | None = None  # per-round few-shot [{"role","content"}]
+    # per-round few-shot [{"role","content"}]; settable in before_llm, spliced
+    # into messages between the system message and the hook's message zone
+    examples: list[dict[str, Any]] | None = None
     addendum: str | None = None  # per-turn note rendered last into the system message
     tool_call: dict[str, Any] | None = None  # set: {"name","arguments"} or None (veto)
     tool_result: Any = None  # core's return value; hooks may rewrite
