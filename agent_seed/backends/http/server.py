@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from ... import __version__
 from ...core import DEFAULT_SYSTEM_PROMPT, Agent, is_number
-from ...discovery import get_hooks_for_agent, list_agents
+from ...discovery import RESERVED_AGENT_NAME, get_hooks_for_agent, list_agents
 from ...hooks import Hooks, RunContext
 from ...llm import LLMConfig, LLMConfigError, OpenAICompatClient
 from ...prompting import compose_system, normalize_examples
@@ -121,6 +121,11 @@ class SessionStore:
 
     def get(self, session_id: str | None, agent_name: str | None = None) -> tuple[str, Agent]:
         session_id = session_id or uuid.uuid4().hex
+        # The reserved name always names the main agent (None), never a folder
+        # (discovery.py RESERVED_AGENT_NAME); normalize it once here so the
+        # switch logic below treats it as a plain request for the main agent.
+        if agent_name == RESERVED_AGENT_NAME:
+            agent_name = None
         agent = self._agents.get(session_id)
         if agent is None:
             # One run per Agent. The run id is per-Agent (for debugging,
@@ -139,9 +144,11 @@ class SessionStore:
                 agent_name=agent_name,
             )
             self._agents[session_id] = agent
-        elif agent_name is not None and agent.agent_name != agent_name:
-            # The caller switched agents mid-session: re-resolve hooks and
-            # let the establishment hooks re-fire on the next turn.
+        elif agent.agent_name != agent_name:
+            # A real switch — including back to the main agent (None). Re-resolve
+            # hooks and let the establishment hooks re-fire on the next turn.
+            # An omitted agent_name is a request for the main agent (protocol.md),
+            # not "keep whatever is currently loaded".
             agent.set_agent_name(agent_name)
         return session_id, agent
 

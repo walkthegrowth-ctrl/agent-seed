@@ -713,6 +713,82 @@ def test_chat_agent_switch_mid_session_refires_establishment(tmp_path, monkeypat
         assert "2000.0" in body2 and "200.0" not in body2
 
 
+def test_chat_agent_omitted_name_selects_main_agent(tmp_path, monkeypatch):
+    # Regression (REPL `/agent tutor` then `/agent default` then a greeting
+    # still answers as the tutor): an omitted ``agent_name`` on the *same*
+    # session must select the MAIN agent (the hooks root), not keep whatever is
+    # currently loaded. Previously ``SessionStore.get`` guarded the switch with
+    # ``agent_name is not None`` and skipped ``set_agent_name(None)``, so a
+    # session that had used a sub-agent silently stayed on it. See protocol.md
+    # ("An omitted agent_name ... selects the default (main) agent").
+    from agent_seed.discovery import reset_cache
+    from tests.conftest import text_completion, tool_completion
+
+    hooks_root = tmp_path / "hook_modules"
+    (hooks_root / "alpha").mkdir(parents=True)
+    # alpha: whitelist calculator, rewrite the result x100 -> "200.0"
+    (hooks_root / "alpha" / "a.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
+        "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 100\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent, after_tool_call=after_tool_call)\n"
+    )
+    # root (main agent): whitelist calculator, rewrite the result x1000 -> "2000.0"
+    (hooks_root / "root.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
+        "def after_tool_call(ctx): ctx.tool_result = (ctx.tool_result or 0) * 1000\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent, after_tool_call=after_tool_call)\n"
+    )
+
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(hooks_root))
+    reset_cache()
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+
+    script = [
+        tool_completion("calculator", {"expression": "1 + 1"}),
+        text_completion("first"),
+        tool_completion("calculator", {"expression": "1 + 1"}),
+        text_completion("second"),
+    ]
+
+    def fake_client_factory(cfg):
+        class _Fake:
+            def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+                completion = script.pop(0)
+                if on_token is not None and completion.content:
+                    on_token(completion.content)
+                return completion
+
+        return _Fake()
+
+    monkeypatch.setattr(server, "OpenAICompatClient", fake_client_factory)
+    app = server.create_app(registry)
+
+    with TestClient(app) as test_client:
+        # Turn 1: use agent alpha (x100 -> "200.0"). Mints a session.
+        with test_client.stream(
+            "POST", "/chat", json={"message": "hi", "agent_name": "alpha"}
+        ) as response:
+            sid = response.headers["x-session-id"]
+            body1 = "".join(response.iter_text())
+        assert "200.0" in body1 and "2000.0" not in body1
+
+        # Turn 2: SAME session_id, NO agent_name. Omission must re-resolve to
+        # the main (root) agent (x1000 -> "2000.0") — not stay on alpha.
+        with test_client.stream(
+            "POST", "/chat", json={"message": "hi", "session_id": sid}
+        ) as response:
+            assert response.headers["x-session-id"] == sid
+            body2 = "".join(response.iter_text())
+        assert "2000.0" in body2 and "200.0" not in body2
+
+
 # -- runtime model selection (/config) ----------------------------------------
 
 

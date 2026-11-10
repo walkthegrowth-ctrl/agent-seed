@@ -280,7 +280,10 @@ If `session_id` is omitted, the server assigns one and returns it in the
 `agent_name` is optional. When provided, the agent's hooks are re-resolved
 against `hook_modules/<agent_name>/` (falling back to `hook_modules/` if
 that subdirectory does not exist) and the establishment hooks re-fire
-(see `manual.md`). Omit it to keep / use the default agent.
+(see `manual.md`). An omitted `agent_name` (or the reserved name `default`)
+selects the **default (main) agent** — the `hook_modules/` root — so a
+session that was using a sub-agent must re-omit it (or send `default`) to
+switch back. Omitting it never means "keep whatever is currently loaded".
 
 Response: `200`, `Content-Type: text/event-stream`, `X-Session-Id: <id>`.
 
