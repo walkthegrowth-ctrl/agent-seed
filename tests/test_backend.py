@@ -999,3 +999,55 @@ def test_pending_config_survives_unrelated_chat(monkeypatch, tmp_path):
         assert app.state.fakes[-1].config.model == "x-model"
 
     mp2.undo()
+
+
+async def test_chat_streams_in_isolation_across_concurrent_handles(monkeypatch):
+    """Exercise the `async def` SSE handler on a real event loop (the sync
+    TestClient can't, and this is the project's only genuine async surface).
+    Two concurrent chat requests must each receive their own scripted
+    completions — no cross-session script corruption."""
+    import asyncio
+
+    import httpx2
+
+    from agent_seed.hooks import Hooks
+    from tests.conftest import text_completion
+
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    class _Fake:
+        def __init__(self, config):
+            self.config = config
+            self._answer = None
+
+        def chat(self, messages, tools=None, on_token=None, config=None, max_tokens=None):
+            # Echo the request's message so each concurrent session's
+            # completion is distinct and we can assert isolation.
+            last_user = next(m["content"] for m in reversed(messages) if m.get("role") == "user")
+            self._answer = f"echo:{last_user}"
+            if on_token is not None:
+                on_token(self._answer)
+            return text_completion(self._answer)
+
+    monkeypatch.setattr(server, "OpenAICompatClient", _Fake)
+    registry = ToolRegistry()
+    registry.register(calculator)
+    hooks = Hooks(enter_agent=lambda ctx: setattr(ctx, "allowed_tools", ["calculator"]))
+    app = server.create_app(registry, hooks=hooks)
+
+    transport = httpx2.ASGITransport(app=app)
+
+    async def _chat(session_id: str, message: str) -> str:
+        async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/chat", json={"session_id": session_id, "message": message}
+            )
+            return response.text
+
+    body1, body2 = await asyncio.gather(_chat("s1", "h1"), _chat("s2", "h2"))
+
+    # Each session's stream must contain exactly its own echoed message.
+    assert "echo:h1" in body1 and "echo:h2" not in body1
+    assert "echo:h2" in body2 and "echo:h1" not in body2
+    # Both reached the terminal `done` event.
+    assert "event: done" in body1 and "event: done" in body2

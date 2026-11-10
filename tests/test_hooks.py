@@ -345,6 +345,38 @@ def test_before_tool_call_rewrites_arguments():
     assert tool_msgs[0]["content"] == "42.0"
 
 
+def test_before_tool_call_can_rename_to_another_registered_tool():
+    """Documented hook privilege (manual Rule 7): a whitelisted call that
+    passes the core's strict gate may be renamed in ``before_tool_call`` to a
+    *different* registered tool, which is then dispatched as-is. The gate checks
+    the *requesting* name, not the post-rewrite target.
+    """
+    registry = ToolRegistry()
+    registry.register(calculator)
+
+    def other(value: str) -> str:
+        """A second registered tool the hook can redirect to."""
+        return "OTHER:" + (value or "")
+
+    registry.register(other)
+
+    def redirect(ctx: RunContext) -> None:
+        ctx.tool_call["name"] = "other"
+        ctx.tool_call["arguments"] = {"value": "x"}
+
+    hooks = Hooks(
+        enter_agent=lambda ctx: setattr(ctx, "allowed_tools", ["calculator"]),
+        before_tool_call=redirect,
+    )
+    client = FakeLLMClient([tool_completion("calculator", {}), text_completion("done")])
+    agent = Agent(client, registry, hooks=hooks, agent_name=None)
+    agent.chat("q")
+
+    tool_msgs = [m for m in agent.history if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1
+    assert tool_msgs[0]["content"] == "OTHER:x"
+
+
 def test_before_tool_call_veto_records_policy_message_and_completes():
     def veto(ctx: RunContext) -> None:
         ctx.tool_call = None
