@@ -72,13 +72,33 @@ agent is*.
    you> I'm stuck on why a negative times a negative is a positive.
    ```
 
-   You should feel the tone shift toward your tutor's voice. The agent was made
-   by the appearance of its folder + `prompt.md`; nothing else.
+    You should feel the tone shift toward your tutor's voice. The agent was made
+    by the appearance of its folder + `prompt.md`; nothing else.
 
-   > How does this work? An agent folder is "replacing" the default agent for the
-   > time that agent is selected, and its `prompt.md` becomes the instructions it
-   > starts every conversation with. Details: [manual — "The four channels"]
-    > (manual.md#the-four-channels).
+    > How does this work? An agent folder is "replacing" the default agent for the
+    > time that agent is selected, and its `prompt.md` becomes the instructions it
+    > starts every conversation with. Details: [manual — "The four channels"]
+     > (manual.md#the-four-channels).
+
+    > **If the model ignores the persona and says things like "I'm Qwen, an AI
+    > assistant …"** — that is the *model's* self-report, not a bug in agent
+    > selection. The system **is** sending the `prompt.md` text to the model
+    > (you can verify with `curl 'http://127.0.0.1:8787/prompt?session_id=<id>&live=true'`,
+    > look at the `identity` field). Most likely causes:
+    > - **The model is weak / short-prompt-ignoring.** Small models and some
+    >   higher-temperature models routinely self-report their training-time
+    >   identity ("I'm Qwen…") even when the system message says otherwise.
+    >   Use a bigger model, or make `prompt.md` longer and more distinctive.
+    > - **The session history already contains a conflicting self-utterance.**
+    >   History is carried across agent switches. If an earlier turn said
+    >   "I'm Qwen, a large language model …", a weak model tends to keep that
+    >   identity even though the `system` message now says "You are a patient
+    >   math tutor."
+    > **The standard fix:** start a fresh session
+    > (`/reset` in the REPL, or a new REPL), then select the agent first
+    > (`/agent tutor`) so its identity has its first turn with a clean history.
+    > Details: [manual — "Agents: hook subdirectories", the callout there]
+    > (manual.md#agents-hook-subdirectories).
 
 ---
 

@@ -1057,6 +1057,51 @@ in for the root's and its establishment hooks re-fire on the next `chat()`
 (further below). To remove the agent, delete `hook_modules/alpha/`. No
 registration anywhere.
 
+> **When an agent is selected, the right prompt really does reach the LLM** —
+> and the model's *reply* is a different question from the prompt.
+>
+> Selecting an agent re-resolves its hooks and re-seeds the *system prompt*
+> (its `prompt.md` identity) from that agent. Once selected, the **exact
+> system message sent to the LLM is the agent's**, and going back to
+> `default` reverts it to the main agent's (verified at the wire by
+> `tests/test_backend.py::test_agent_selection_changes_composed_system_prompt`;
+> inspect any live session with
+> `curl 'http://127.0.0.1:8787/prompt?session_id=<id>&live=true'`, whose
+> `identity` field is what was just sent — see
+> "Reading the composed prompt (`GET /prompt`)", below).
+>
+> **But a small model — or one that is weak at following a short system
+> prompt — may self-report an identity different from the one you set.**
+> Two things that look like "agent selection isn't working" are in fact
+> the *model's* behavior:
+>
+> 1. **Identity self-anchoring in the session history.** The conversation
+>    history is carried across agent switches within a session. If turn 1
+>    (as the main agent) produced `"I'm Qwen, a large language model
+>    developed by Alibaba…"`, then turn 2 (as `tutor`, whose identity is
+>    *"You are a patient math tutor."*) still contains that prior answer. The
+>    model is consistent with itself and will often *keep* the identity it
+>    already claimed, even though the `system` message now says otherwise.
+>    The system did the right thing; it didn't control the model's reply.
+> 2. **Model strength / temperature.** Some models (smaller ones, or some
+>    temperatures) ignore a short, one-line identity in favor of their
+>    training-time identity ("I'm Qwen…"). A longer, more distinctive, and
+>    more explicit `prompt.md` (see the `tutor` example in
+>    [`howto-craft-an-agent.md`](howto-craft-an-agent.md)) is far more
+>    likely to be honored.
+>
+> **The practical remedy is a fresh session after switching agents**
+> (`/reset` in the REPL), or select the new agent *first* in a fresh session
+> — so the identity has its first turn without a prior conflicting
+> self-utterance in the history. Alternatively, use a model that is known to
+> honor the system prompt more strongly.
+>
+> **How to tell the difference (a bug vs. the model):** read the wire, not
+> the answer. `GET /prompt?session_id=<id>&live=true` shows the **exact**
+> system message the core sent, `agent_name` shows which agent is active,
+> and `ctx.system_prompt` is what the agent's `prompt.md` seeds. If those
+> are correct, the system did its part; the remainder is the model.
+
 #### Per-agent tool access (strict whitelist)
 
 Tooling is **opt-in per agent**. The default `ctx.allowed_tools` is `None`,
@@ -1628,8 +1673,36 @@ fired. Fix it by adding the name to the agent's whitelist in `enter_agent`
 switched-in one and you expected it to inherit the previous agent's tools: it
 does not — tool policy is opt-in per agent. Declare what you want.
 
-**Q: How do I give agent X different tools than agent Y?**
-A: Put each in its own folder and set `ctx.allowed_tools` in each `enter_agent`:
+ **Q: I switched to an agent (e.g. `/agent tutor`) but the model still
+ acts like a different agent — "I'm Qwen, my main purpose is …". Is agent
+ selection broken?**
+ A: Probably not. **Selection is working: the model is receiving the right
+ system prompt.** The core re-resolves the agent's hooks and re-seeds the
+ system prompt from the agent's `prompt.md`. Inspect the wire to be sure:
+ `curl 'http://127.0.0.1:8787/prompt?session_id=<id>&live=true'` — the
+ `identity` field is exactly what was sent, and `agent_name` shows which
+ agent was active. If those are correct, the system did its part.
+ What you're seeing is the *model's* reply, which is a different question
+ from the prompt. Two frequent causes:
+ 1. **Identity self-anchoring in the session history.** History is carried
+ across agent switches within a session. If an earlier answer (as the main
+ agent) said "I'm Qwen / a large language model", a weak model will often
+ keep that identity even though the `system` message now says otherwise.
+ 2. **Model strength.** Small models (or high-temperature runs) frequently
+ ignore a one-line identity and self-report their training-time identity.
+ **Fix:** select the new agent *first* in a fresh session (do
+ `/reset`, then `/agent tutor` — or start a new REPL session and go
+ straight to `/agent tutor`), use a larger / stronger model, or make the
+ agent's `prompt.md` longer and more distinctive (see
+ [`howto-craft-an-agent.md`](howto-craft-an-agent.md)).
+ To rule out a selection bug deterministically, run
+ `tests/test_backend.py::test_agent_selection_changes_composed_system_prompt`
+ — it asserts the exact system message sent, default → tutor → default.
+ See "Agents: hook subdirectories" (the callout there) and
+ "Reading the composed prompt (`GET /prompt`)".
+
+ **Q: How do I give agent X different tools than agent Y?**
+ A: Put each in its own folder and set `ctx.allowed_tools` in each `enter_agent`:
 
 ```python
 # hook_modules/x/tools.py

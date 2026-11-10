@@ -789,6 +789,121 @@ def test_chat_agent_omitted_name_selects_main_agent(tmp_path, monkeypatch):
         assert "2000.0" in body2 and "200.0" not in body2
 
 
+def test_agent_selection_changes_composed_system_prompt(tmp_path, monkeypatch):
+    # E2E (the REPL flow the user actually drove): selecting an agent — and
+    # going back to the main (default) agent — must change the *exact* system
+    # prompt the core sends to the LLM. The model's own "who are you" reply is
+    # temperature-dependent and can self-report its base identity even when the
+    # system prompt is correct, so we do NOT assert on it. Instead the fake LLM
+    # records the precise ``messages`` it is called with and we assert on
+    # ``messages[0]`` — the composed system prompt the model actually receives.
+    #
+    # This mirrors the user's real hook layout: a main (root) agent defined by
+    # a ``prompt.md`` identity plus a calculator whitelist, and a named
+    # sub-agent ``tutor`` that is a ``prompt.md`` identity file ("You are a
+    # patient math tutor.") — exactly the shape of hook_modules/tutor/.
+    from agent_seed.discovery import reset_cache
+    from tests.conftest import text_completion
+
+    hooks_root = tmp_path / "hook_modules"
+    hooks_root.mkdir(parents=True)
+    # Main (root) agent: a file-driven identity (hook_modules/prompt.md).
+    (hooks_root / "prompt.md").write_text("You are a concise, helpful assistant.\n")
+    # ...plus a python tool-whitelist declaration (hook_modules/00_tools.py).
+    (hooks_root / "00_tools.py").write_text(
+        "from agent_seed.hooks import Hooks, RunContext\n"
+        "def enter_agent(ctx):\n"
+        "    ctx.allowed_tools = ['calculator']\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent)\n"
+    )
+    # Named sub-agent 'tutor': a prompt.md identity, like the user's folder.
+    (hooks_root / "tutor").mkdir(parents=True)
+    (hooks_root / "tutor" / "prompt.md").write_text("You are a patient math tutor.\n")
+    (hooks_root / "tutor" / "tools.py").write_text(
+        "from agent_seed.hooks import Hooks, RunContext\n"
+        "def enter_agent(ctx):\n"
+        "    ctx.allowed_tools = ['calculator']\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent)\n"
+    )
+
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(hooks_root))
+    reset_cache()
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+
+    # Records the EXACT messages each LLM call receives (messages[0] is the
+    # composed system prompt the model sees). No tool is ever called, so each
+    # script entry is a plain reply.
+    seen: list = []
+
+    def fake_chat(messages, tools=None, on_token=None, config=None, max_tokens=None):
+        seen.append([dict(m) for m in messages])
+        completion = text_completion("hi")
+        if on_token is not None and completion.content:
+            on_token(completion.content)
+        return completion
+
+    class _Fake:
+        def __init__(self, config):
+            self.config = config
+
+        def chat(self, *a, **k):
+            return fake_chat(*a, **k)
+
+    monkeypatch.setattr(server, "OpenAICompatClient", lambda cfg: _Fake(cfg))
+    app = server.create_app(registry)  # hooks=None -> discovery, like the real backend
+
+    ROOT = "concise, helpful assistant"
+    TUTOR = "patient math tutor"
+
+    def system_of(i: int) -> str:
+        return seen[i][0]["content"]
+
+    with TestClient(app) as test_client:
+        # Sanity: tutor is discoverable (mirrors `/agents` showing it).
+        assert "tutor" in test_client.get("/agents").json()["agents"]
+
+        # 1) main agent (no agent_name) -> root identity, not tutor.
+        with test_client.stream(
+            "POST", "/chat", json={"message": "Hi, who are you?"}
+        ) as response:
+            sid = response.headers["x-session-id"]
+            "".join(response.iter_text())
+        assert ROOT in system_of(0), system_of(0)
+        assert TUTOR not in system_of(0), system_of(0)
+        # The core must record that the active agent is the main one (None).
+        live = test_client.get("/prompt", params={"session_id": sid, "live": "true"}).json()
+        assert live["agent_name"] is None
+
+        # 2) SAME session, select tutor -> tutor identity, not root.
+        with test_client.stream(
+            "POST",
+            "/chat",
+            json={"message": "Hi, who are you?", "session_id": sid, "agent_name": "tutor"},
+        ) as response:
+            "".join(response.iter_text())
+        assert TUTOR in system_of(1), system_of(1)
+        assert ROOT not in system_of(1), system_of(1)
+        live = test_client.get("/prompt", params={"session_id": sid, "live": "true"}).json()
+        assert live["agent_name"] == "tutor"
+
+        # 3) SAME session, back to main (omitted agent_name) -> root identity again.
+        with test_client.stream(
+            "POST", "/chat", json={"message": "Hi, who are you?", "session_id": sid}
+        ) as response:
+            "".join(response.iter_text())
+        assert ROOT in system_of(2), system_of(2)
+        assert TUTOR not in system_of(2), system_of(2)
+        live = test_client.get("/prompt", params={"session_id": sid, "live": "true"}).json()
+        assert live["agent_name"] is None
+
+    reset_cache()
+
+
 # -- runtime model selection (/config) ----------------------------------------
 
 
