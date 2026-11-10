@@ -145,7 +145,9 @@ agent_seed/
   tools.py                @tool registry, JSON-schema gen, calculator
   prompting.py            compose identity/context/examples/addendum into a round
   composer/               `agent compose`: generator + tool reservoir catalog + CLI
-    cli.py                `agent-compose` entry point (creates an agent folder)
+    cli.py                `agent-compose` entry point (flags + interactive wizard)
+    generator.py          pure Spec → Plan → write_plan (the agent folder builder)
+    catalog.py            built-in tools + tools/ "reservoir" (ast-scanned)
   backends/
     http/
       server.py           FastAPI app + SSE + sessions

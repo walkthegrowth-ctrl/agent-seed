@@ -232,15 +232,23 @@ last composed value, including any `before_llm` hook adjustments:
   folded with (optionally) context and addendum via
   `compose_system` (see `docs/manual.md`, "Prompting").
 - `examples` is the canonical `[{"role","content"}, …]` shape (same as the
-  OpenAI wire) — it is what `compose_prompt` places between the system message
+  OpenAI wire) — it is what `compose_prompt` splices between the system message
   and the stored history.
 - `addendum` is non-null only when `live=true` and the last round's hook set it.
 - `agent_name` / `session_id` echo back what was resolved, so the caller knows
   which one of the two views it got.
-- Read-only: this endpoint does not mutate the active agent's state, does not
-  fire hooks, and does not change the LLM. Mirrors `GET /tools?agent_name=…`
-  in that way (resolves the *agent's own* declared baselines against a scratch
-  `RunContext` — no side-effect on the live agent).
+- Read-only: this endpoint does not mutate the active agent's state, fires no
+  hooks, and does not change the LLM. The scratch view resolves the agent's
+  *declared baselines* (`prompt.md` / `context.md` / `examples.jsonl`) against a
+  scratch `RunContext`. This is slightly different from `GET /tools?agent_name=…`,
+  which *does* run the agent's `enter_agent` (against a scratch context) to
+  learn its tool whitelist. So the two endpoints consult different surfaces of
+  an agent (declared baselines vs. the `enter_agent` hook) — a difference in
+  which hooks they consult, not a side-effect on the live agent. For example, an
+  agent that specialises itself only inside `enter_agent` (e.g. declares its
+  tools there) is fully reflected on `GET /tools?agent_name=…` (whitelist
+  learned) but only its declared baseline files are reflected on
+  `GET /prompt?agent_name=…`, since `/prompt` does not execute the hook.
 
 Status codes:
 

@@ -96,6 +96,7 @@ For a function `foo(a: str, b: int) -> float` with docstring `"Do the thing."`:
 | `list[T]`        | `{"type": "array", "items": <T>}` |
 | `dict`           | `{"type": "object"}` |
 | `Any`            | `{}` (no type constraint) |
+| *other / Optional* | `{}` (no type constraint — e.g. `list[str] | None`, `int | None`) |
 | *unannotated*    | param is dropped from the schema (annotate it to expose it) |
 
 ### Registration
@@ -427,6 +428,20 @@ def my_hook(ctx: RunContext) -> None:
 
 agent = Agent(client, registry, hooks=Hooks(finish=my_hook))
 ```
+
+or one-liner straight from the environment:
+
+```python
+agent = Agent.from_env()                     # reads LLM_* from env/.env
+agent = Agent.from_env(None, MyRegistry())   # with a custom tool registry
+```
+
+(`Agent.from_env` reads the LLM client's config from `LLM_BASE_URL` /
+`LLM_API_KEY` / `LLM_MODEL` (via `LLMConfig.from_env`) and builds the
+`OpenAICompatClient` for you. It does **not** take a `hooks` parameter —
+auto-discovery still applies, and the run's model is still overridable through
+`Agent.set_model` / `Agent.test_model` and the usual hook slots, exactly as
+with `Agent(client, registry, hooks=…)`.)
 
 `Hooks` slots all default to `None` — unset hooks simply don't run.
 
@@ -1061,7 +1076,10 @@ two points:
    `"error: tool '<name>' not available to this agent"` instead of executing.
    The hook-level `before_tool_call` veto gate does **not** fire in that
    branch — the core settles tool availability first, before any hook gets a
-   chance to (wrongly) allow a disallowed name.
+   chance to (wrongly) allow a disallowed name. Note the gate checks the
+   *requesting* tool name; a call that passes the gate may then be **renamed**
+   by `before_tool_call` (the privilege noted in Rule 7, below) — that
+   redirected tool is whatever the hook chose.
 
 **Sticky semantics.** Like `system_prompt`, a change to `ctx.allowed_tools`
 persists until overwritten. `enter_agent` is the canonical place to set it
@@ -1206,8 +1224,10 @@ To remove this agent:  rm -rf hook_modules/tutor
 | `sign.py`       | `--signoff` set      | a `finish` hook that appends your line to every answer |
 
 A channel you don't pass does not become a file — the agent is exactly as big as
-you asked for. If you pass only a name, an empty `prompt.md` (or nothing at all)
-is still a legal agent folder; you can fill it in later.
+you asked for, *except* a name with **no channels at all**, which the composer
+turns into a neutral **skeleton** folder (all five channel files as empty/no-op
+placeholders plus a `README.md`) so you always get a loadable, editable starting
+point instead of a blank folder (see [the interactive wizard](#the-interactive-wizard)).
 
 #### The tool reservoir
 
@@ -1445,9 +1465,14 @@ Breaking any of these is a **major** change.
 6. **The canonical system-prompt channel is `ctx.system_prompt`.** The core
    applies it to `messages[0]` after `before_llm`. Directly editing `messages[0]`
    is also legal but will be overwritten by the core — prefer the field.
-7. **Veto is explicit.** `ctx.tool_call = None` is the only way to stop a tool
-   call. The core records a well-formed `role: tool` `"skipped by policy"`
-   result so the next API call stays valid.
+7. **Veto is explicit; rewrite is a privilege.** `ctx.tool_call = None` is the
+   only way to stop a tool call (the core records a well-formed `role: tool`
+   `"skipped by policy"` result so the next API call stays valid). A
+   `before_tool_call` hook may also *rename* a whitelisted call to a different
+   registered tool — the gate checks the requesting name, then the redirected
+   tool is dispatched as-is. Treat that rename as a deliberate hook privilege
+   (the hook owns the call's target), distinct from the strict boundary that a
+   *requesting* tool outside the whitelist is rejected before any hook runs.
 8. **No re-entry.** A hook must not call `agent.chat()` from inside itself.
 9. **Hooks are synchronous.** The agent loop runs in a worker thread; async
    hooks are out of scope.
@@ -1468,9 +1493,11 @@ Breaking any of these is a **major** change.
     **execute** (veto) paths. The core resets the field to `None` on each
     agent switch, so a switched-to agent that declares nothing sees no tools
     — there is no inheritance or "always-on" base set. A hook may *narrow* a
-    call (`before_tool_call`) or change this round's offer (`ctx.tools`), but
-    it can never *re-allow* a tool the whitelist already rejected.
- 13. **Model change is a gated, atomic commit.** The run's LLM is
+    call (`before_tool_call`, including renaming it to another registered
+    tool — see Rule 7) or change this round's offer (`ctx.tools`), but it can
+    never *re-allow* a tool the whitelist already rejected (the gate settles a
+    non-whitelisted *requesting* name before any hook runs).
+  13. **Model change is a gated, atomic commit.** The run's LLM is
     `ctx.current_model` (a sticky run-scoped field, seeded from
     `ctx.base_model` at construction). The only sanctioned way for a
     *user-facing* change to be committed is `Agent.set_model(candidate)`,
@@ -1699,20 +1726,14 @@ total (`frontends/repl/app.py::format_tokens`).
   the run. Always available to hooks; use it as the source when computing a
   new `ctx.system_prompt`.
 - **base model** — `ctx.base_model`: the immutable `LLMConfig` the `Agent` was
-  built with. The canonical restore target
-  (`ctx.current_model = ctx.base_model`).
+  built with; the canonical restore target (`ctx.current_model = ctx.base_model`).
+  See [Model selection](#model-selection-dynamic-sticky).
 - **current model** — `ctx.current_model`: the sticky `LLMConfig` the core
-  actually calls; the single source of truth per request. Written by the
-  active agent's `enter_agent`, `Agent.set_model` (gated by
-  `on_model_change`), and `before_llm` (per round, final word). Survives
-  agent switches and `reset()` — the core never resets it.
+  actually calls; the single source of truth per request. See [Model
+  selection](#model-selection-dynamic-sticky).
 - **allowed_tools** — `ctx.allowed_tools`: the sticky strict whitelist of tool
-  names the active agent may offer and call. Set by the agent's `enter_agent`
-  hook (or any other hook; sticky until overwritten). The core enforces it at
-  both the offer point (tool schemas) and the execute point (a non-allowed name
-  is rejected before `before_tool_call` runs). `None`/`[]` is *no tools* —
-  tooling is opt-in per agent. The core resets the field to `None` on each
-  agent switch, so a switched-to agent that declares nothing sees no tools.
+  names the active agent may offer and call; `None`/`[]` is *no tools*. Set by
+  the agent's `enter_agent`. See [Per-agent tool access](#per-agent-tool-access-strict-whitelist).
 - **discovered hook** — a hook loaded automatically from `hook_modules/` via
   `make()` at first use.
 - **establishment** — the one-time (per run) or per-session (per session)
