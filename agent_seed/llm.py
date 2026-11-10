@@ -12,12 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-try:
-    from dotenv import load_dotenv
-except ImportError:  # pragma: no cover - dotenv is a hard dep in practice
-
-    def load_dotenv(*args, **kwargs):
-        return False
+from dotenv import load_dotenv
 
 
 class LLMConfigError(RuntimeError): ...

@@ -19,9 +19,9 @@ jobs:
       - name: Install deps (runtime + dev group)
         run: uv sync --frozen
       - name: Lint
-        run: uv run ruff check agent_seed experiments tests
+        run: uv run ruff check agent_seed experiments tools tests
       - name: Format check
-        run: uv run ruff format --check agent_seed experiments tests
+        run: uv run ruff format --check agent_seed experiments tools tests
       # Fail the build if any locked package has a known vulnerability in the
       # resolved version (checked against the OSV database).
       - name: Audit locked deps against OSV

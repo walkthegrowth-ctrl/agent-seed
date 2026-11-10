@@ -256,6 +256,7 @@ def _help_layout() -> str:
         ("/model force <n>", "switch the model without a probe"),
         ("/model test <n>", "probe a model without switching"),
         ("/quit", "exit the REPL"),
+        ("/exit", "alias for /quit"),
         ("/", "(alone) open a multi-line block — see below"),
     ]
     width = max(len(cmd) for cmd, _ in commands)
