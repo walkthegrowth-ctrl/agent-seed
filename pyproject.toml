@@ -7,7 +7,10 @@ requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
-    "httpx2>=2.16",
+    # Pinned to 2.16.* on purpose: the client (agent_seed/llm.py, frontends)
+    # and tests (tests/e2e/*) speak httpx2 directly, so a major bump is a
+    # code change, not a config one. Widen only once we exercise the new major.
+    "httpx2>=2.16,<3",
     "python-dotenv>=1.0",
     "rich>=13.7",
     "prompt_toolkit>=3.0",

@@ -56,6 +56,7 @@ is half-merged. When an ``agent_name`` is in play, a broken
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -249,7 +250,12 @@ def _load_examples(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_module(path: Path) -> Hooks:
-    module_name = f"agent_seed_hook_module_{path.stem}"
+    # A stable, per-path-unique name so that two hook folders that happen to
+    # carry the same file stem (e.g. both have 00_tools.py) do not collide in
+    # sys.modules. The stem keeps the name readable in tracebacks; a short
+    # digest of the resolved absolute path guarantees uniqueness across folders.
+    digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
+    module_name = f"agent_seed_hook_module_{path.stem}_{digest}"
     try:
         spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:

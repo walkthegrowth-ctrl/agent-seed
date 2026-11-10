@@ -48,6 +48,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import termios
 import threading
 import time
@@ -121,6 +122,9 @@ def base_env() -> dict[str, str]:
         "COLUMNS": "160",
         "LINES": "50",
         "TERM": "dumb",  # line-input mode: no CPR request, prompt replies instantly
+        # Hermetic: keep the REPL's input-history file in a temp dir rather than
+        # the runner's real ~/.local/state (or CWD).
+        "REPL_HISTORY": os.path.join(tempfile.gettempdir(), "agent_seed_test_repl_history"),
     }
 
 

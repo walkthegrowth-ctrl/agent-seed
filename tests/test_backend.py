@@ -168,6 +168,87 @@ def test_tools_endpoint_uses_apps_registry_not_global(monkeypatch):
         assert per_agent == {"tools": [], "names": []}
 
 
+def test_tools_raises_hook_returns_clean_500_json(monkeypatch, tmp_path):
+    """Regression: an agent whose enter_agent hook **raises** must return a
+    clean 500 JSON body (not a FastAPI traceback, not a 200 with the default
+    body). Before the fix the hook raised straight out of the request handler
+    into FastAPI's error middleware — the test client would have received a 500
+    with ``text/plain`` body, or a 200 when the hook wrote a marker before
+    raising.
+    """
+    from agent_seed.discovery import reset_cache
+
+    hooks_root = tmp_path / "hk"
+    (hooks_root / "boom").mkdir(parents=True)
+    (hooks_root / "boom" / "b.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx):\n"
+        "    # a broken agent hook: it raises before declaring tools.\n"
+        "    raise RuntimeError('enter_agent exploded')\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent)\n"
+    )
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(hooks_root))
+    reset_cache()
+
+    reg = ToolRegistry()
+    reg.register(calculator)
+    app = server.create_app(reg)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert "boom" in client.get("/agents").json().get("agents", [])
+        response = client.get("/tools", params={"agent_name": "boom"})
+        assert response.status_code == 500
+        assert (response.headers.get("content-type") or "").startswith("application/json"), (
+            f"expected a JSON error body, got {response.headers.get('content-type')!r}"
+        )
+        body = response.json()
+        assert "error" in body and "exploded" in body["error"]
+        assert "Traceback" not in response.text
+
+
+def test_chat_with_broken_agent_switch_returns_clean_500(monkeypatch, tmp_path):
+    """Regression: ``POST /chat`` with ``agent_name=<broken>`` must return a
+    clean JSON 500 (the agent hook folder failed to load / entered). Before
+    the fix, only ``LLMConfigError`` was caught here and a ``DiscoveryError``
+    (raised by an enter_agent that raises, or by a broken hook file) escaped
+    into FastAPI's middleware with a traceback body.
+    """
+    from agent_seed.discovery import reset_cache
+
+    hooks_root = tmp_path / "hk"
+    (hooks_root / "main").mkdir(parents=True)
+    (hooks_root / "main" / "m.py").write_text(
+        "from agent_seed.hooks import Hooks\n"
+        "def enter_agent(ctx): ctx.allowed_tools = ['calculator']\n"
+        "def make() -> Hooks:\n"
+        "    return Hooks(enter_agent=enter_agent)\n"
+    )
+    (hooks_root / "bad_agent").mkdir()
+    (hooks_root / "bad_agent" / "b.py").write_text(
+        "from agent_seed.discovery import DiscoveryError\n"
+        "from agent_seed.hooks import Hooks\n"
+        "def make() -> Hooks:\n"
+        "    raise DiscoveryError('broken agent folder')\n"
+    )
+    monkeypatch.setattr("agent_seed.discovery.DEFAULT_HOOKS_FOLDER", str(hooks_root))
+    reset_cache()
+
+    reg = ToolRegistry()
+    reg.register(calculator)
+    app = server.create_app(reg)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert "main" in client.get("/agents").json().get("agents", [])
+        assert "bad_agent" in client.get("/agents").json().get("agents", [])
+        response = client.post("/chat", json={"message": "hi", "agent_name": "bad_agent"})
+        assert response.status_code == 500
+        assert (response.headers.get("content-type") or "").startswith("application/json"), (
+            f"expected a JSON error body, got {response.headers.get('content-type')!r}"
+        )
+        body = response.json()
+        assert "broken agent folder" in body.get("error", "")
+        assert "Traceback" not in response.text
+
+
 def test_chat_streams_tool_then_token_then_done(tool_client):
     test_client, _ = tool_client
     with test_client.stream("POST", "/chat", json={"message": "what is 6 * 7?"}) as response:

@@ -11,8 +11,9 @@ __pycache__/
 .coverage
 htmlcov/
 
-# local config & editor/history secrets
+# local config & secrets
 .env
+# REPL input history (legacy CWD location; now under $XDG_STATE_HOME)
 .repl_history
 
 # OS / editor noise

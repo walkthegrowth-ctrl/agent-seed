@@ -87,7 +87,10 @@ Status codes:
 
 - `200` — applied or recorded. Body: `{ "ok": true, "session_id": "<id>", "llm": {...} }`
   (omit `session_id` when applied globally).
-- `400` — no fields supplied / empty `model`.
+- `400` — no fields supplied / empty `model` / a base config could not be
+  determined (e.g. `LLM_MODEL` unset and no app-level default set). Same body
+  as `POST /config/test`: `{ "error": "<reason>" }`. A change is merged over a
+  base config, so with no base there is nothing to merge over.
 - `409` — vetoed by `on_model_change`. Body: `{ "error": "<reason>" }`.
 
 `api_key` is never returned (only `api_key_set`).
@@ -134,8 +137,9 @@ Optional query parameter:
   no `ctx.allowed_tools`) returns `{"tools": [], "names": []}`. Strict
   policy: an omitted set is *zero tools*, not *all tools*. To read an agent's
   whitelist the backend runs that agent's `enter_agent` against a scratch
-  `RunContext`; if that hook **raises**, `GET /tools?agent_name=<n>` returns
-  `500` — a broken agent hook, not a protocol error.
+  `RunContext`; if that hook **raises**, the backend returns `500` with a
+  clean JSON body `{ "error": "<reason>" }` — a broken agent hook, not a
+  protocol error.
 
 Without `agent_name`, the whole tool catalog (the union of every registered
 tool) is returned. This is a *catalog* endpoint — it is not a live session

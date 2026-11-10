@@ -344,28 +344,32 @@ def create_app(
         )
 
     @app.get("/tools")
-    def tools(agent_name: str | None = None) -> dict[str, Any]:
+    def tools(agent_name: str | None = None) -> JSONResponse:
         # Without agent_name: the whole catalog (what any agent COULD see —
         # useful for inventory / UI, not a live session's toolset).
         # With agent_name: only the tools that agent's whitelist allows.
         # We learn the declared set by running the agent's enter_agent hook
         # against a scratch RunContext (strict policy: None -> no tools).
+        # A broken hook (one that raises) is a server-side fault (protocol.md:
+        # "returns 500") — return a clean JSON body, not a traceback.
         if agent_name is None:
-            tools = registry.schemas()
+            tool_schemas = registry.schemas()
         else:
-            # Only the tools that agent's whitelist allows. We learn the
-            # declared set by running the agent's enter_agent hook against a
-            # scratch RunContext (strict policy: None -> no tools).
             hooks = get_hooks_for_agent(agent_name)
             allowed: list[str] | None = None
             if hooks is not None and hooks.enter_agent is not None:
                 ctx = RunContext(agent_name=agent_name)
-                hooks.enter_agent(ctx)
+                try:
+                    hooks.enter_agent(ctx)
+                except Exception as exc:  # noqa: BLE001 - a broken agent hook
+                    return JSONResponse({"error": str(exc)}, status_code=500)
                 allowed = ctx.allowed_tools
-            tools = registry.schemas_for(allowed) if allowed else []
+            tool_schemas = registry.schemas_for(allowed) if allowed else []
         # names always reflects the tools actually returned (never a whitelist
         # name that is not in the app's registry).
-        return {"tools": tools, "names": [t["function"]["name"] for t in tools]}
+        return JSONResponse(
+            {"tools": tool_schemas, "names": [t["function"]["name"] for t in tool_schemas]}
+        )
 
     @app.get("/agents")
     def agents() -> dict[str, Any]:
@@ -428,7 +432,15 @@ def create_app(
     async def chat(request: ChatRequest):
         try:
             session_id, agent = sessions.get(request.session_id, request.agent_name)
-        except LLMConfigError as exc:
+        except Exception as exc:  # noqa: BLE001 - pre-stream setup failure
+            # Anything that fails before the stream can start is a 500 with a
+            # clean JSON body (protocol: "500 — configuration error before the
+            # stream could start") — never a raw traceback. This covers the
+            # config error (LLM_MODEL unset), a broken agent hook folder
+            # (DiscoveryError from a mid-chat agent_name switch), and a hook
+            # whose enter_agent raises (same documented-500 case as /tools).
+            # The agent switch has already aborted if it failed (no state
+            # was committed), so nothing is left half-set.
             return JSONResponse({"error": str(exc)}, status_code=500)
 
         async def stream():

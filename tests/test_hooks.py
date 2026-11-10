@@ -412,6 +412,64 @@ def test_after_tool_call_rewrites_result():
     assert tool_msgs[0]["content"] == "[redacted] 42.0"
 
 
+def test_tool_call_ids_match_between_assistant_and_tool_when_provider_omits_id():
+    """Regression: a provider that omits ``id`` on tool calls must get a
+    generated one that is **identical** on the assistant ``tool_calls`` entry
+    and the matching ``tool`` result. The core used to derive the fallback
+    independently in each place (two distinct uuids) which produced an invalid
+    turn — strict providers reject a ``role:tool`` result that does not name an
+    id the assistant tool_calls already announced.
+
+    To exercise the fallback, we use a ``ToolCall`` whose ``id`` is an empty
+    string (the conftest helper hard-codes ``call_1``, so we build the
+    completion locally).
+    """
+    from agent_seed.llm import Completion, ToolCall
+
+    registry = ToolRegistry()
+    registry.register(calculator)
+
+    def _allow_all(ctx: RunContext) -> None:
+        ctx.allowed_tools = list(registry.names())
+
+    # Round 1: two tool calls with empty ids, each should get a distinct
+    # generated id that is reused across both appends. Round 2: the final
+    # answer (no tools).
+    tool_round = Completion(
+        content=None,
+        tool_calls=[
+            ToolCall(id="", name="calculator", arguments={"expression": "6 * 7"}),
+            ToolCall(id="", name="calculator", arguments={"expression": "1 + 1"}),
+        ],
+    )
+    final_round = Completion(content="42.0 and 2", tool_calls=[])
+
+    client = FakeLLMClient([tool_round, final_round])
+    agent = Agent(
+        client,
+        registry,
+        system_prompt=DEFAULT_SYSTEM_PROMPT,
+        hooks=Hooks(enter_agent=_allow_all),
+    )
+    agent.chat("q")
+
+    assistant = next(m for m in agent.history if m["role"] == "assistant" and m.get("tool_calls"))
+    tool_msgs = [m for m in agent.history if m["role"] == "tool"]
+    assistant_ids = [tc["id"] for tc in assistant["tool_calls"]]
+    tool_ids = [m["tool_call_id"] for m in tool_msgs]
+    # (a) each pair matches (the regression), (b) the two are distinct (the
+    # fallback was generated, not one id shared across the board — a naive
+    # "always use call_0" would satisfy (a) but break real LLM round-trips
+    # that expect separate ids).
+    assert assistant_ids == tool_ids, (
+        f"assistant and tool-result ids diverged: {assistant_ids} != {tool_ids}"
+    )
+    assert assistant_ids[0] != assistant_ids[1], (
+        "the two no-id calls must get distinct generated ids"
+    )
+    assert all(i.startswith("call_") for i in assistant_ids), assistant_ids
+
+
 # -- prepare / finish ----------------------------------------------------------
 
 

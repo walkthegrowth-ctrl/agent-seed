@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import uuid
 from collections.abc import Iterator
@@ -18,6 +19,30 @@ from ...core import is_number
 from ...discovery import RESERVED_AGENT_NAME
 
 CONSOLE = Console()
+
+
+def history_path() -> str:
+    """The REPL input-history file, in a stable per-home location (not the CWD).
+
+    Prompt history is user state: it should persist across directories and
+    launches, and not scatter into whatever folder the user happens to open the
+    REPL from. It therefore lives under ``$XDG_STATE_HOME`` (convention:
+    ``<home>/.local/state``), not the current working directory. ``$REPL_HISTORY``
+    overrides it for tests / scripts; a read-only ``$XDG_STATE_HOME`` falls back
+    to ``~/.repl_history`` so history is simply disabled-ish rather than fatal.
+    """
+    override = os.environ.get("REPL_HISTORY")
+    if override:
+        return override
+    xdg = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    path = os.path.join(xdg, "agent-seed", "repl_history")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+    except OSError:
+        return os.path.join(os.path.expanduser("~"), ".repl_history")
 
 
 class BackendError(RuntimeError):
@@ -303,7 +328,7 @@ class Repl:
         return session
 
     def run(self) -> int:
-        history = FileHistory(".repl_history") if self.use_history else None
+        history = FileHistory(history_path()) if self.use_history else None
 
         banner = Panel.fit(
             "[bold]agent-seed[/] REPL\n"

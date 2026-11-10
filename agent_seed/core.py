@@ -476,6 +476,17 @@ class Agent:
             if not completion.tool_calls:
                 return self._finish_turn(ctx, completion.content, usage_snapshot)
 
+            # Resolve each tool call's id ONCE: a provider that omits an id gets
+            # a generated one, and we reuse that exact value for both the
+            # assistant ``tool_calls`` entry and the matching ``tool`` result,
+            # so the two always agree. (Re-deriving the fallback independently
+            # in each place could hand them different ids — an invalid turn for
+            # strict providers that require the tool result to name a prior
+            # tool_call id.)
+            call_ids = [
+                call.id or f"call_{uuid.uuid4().hex[:8]}" for call in completion.tool_calls
+            ]
+
             # Record the assistant message with its tool_calls, then results.
             self.history.append(
                 {
@@ -483,20 +494,20 @@ class Agent:
                     "content": completion.content or None,
                     "tool_calls": [
                         {
-                            "id": call.id or f"call_{uuid.uuid4().hex[:8]}",
+                            "id": call_id,
                             "type": "function",
                             "function": {
                                 "name": call.name,
                                 "arguments": json.dumps(call.arguments),
                             },
                         }
-                        for call in completion.tool_calls
+                        for call_id, call in zip(call_ids, completion.tool_calls, strict=True)
                     ],
                 }
             )
 
             allowed_now = ctx.allowed_tools or []
-            for call in completion.tool_calls:
+            for call, call_id in zip(completion.tool_calls, call_ids, strict=True):
                 call_name = call.name
                 call_args = call.arguments
                 vetoed = False
@@ -532,7 +543,7 @@ class Agent:
                 self.history.append(
                     {
                         "role": "tool",
-                        "tool_call_id": call.id or f"call_{uuid.uuid4().hex[:8]}",
+                        "tool_call_id": call_id,
                         "content": content,
                     }
                 )
