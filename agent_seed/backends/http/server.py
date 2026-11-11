@@ -473,7 +473,10 @@ def create_app(
                     if succeeded:
                         turn = dict(agent.context.turn_usage or {})
                         total = sessions.accumulate_usage(session_id, turn)
-                        payload = {"usage": turn or None, "usage_session": total or None}
+                        if turn:
+                            payload["usage"] = turn
+                        if total:
+                            payload["usage_session"] = total
                     put("__done__", payload)
 
             loop.run_in_executor(None, producer)

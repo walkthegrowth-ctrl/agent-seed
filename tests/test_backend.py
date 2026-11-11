@@ -868,9 +868,7 @@ def test_agent_selection_changes_composed_system_prompt(tmp_path, monkeypatch):
         assert "tutor" in test_client.get("/agents").json()["agents"]
 
         # 1) main agent (no agent_name) -> root identity, not tutor.
-        with test_client.stream(
-            "POST", "/chat", json={"message": "Hi, who are you?"}
-        ) as response:
+        with test_client.stream("POST", "/chat", json={"message": "Hi, who are you?"}) as response:
             sid = response.headers["x-session-id"]
             "".join(response.iter_text())
         assert ROOT in system_of(0), system_of(0)

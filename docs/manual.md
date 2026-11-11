@@ -209,7 +209,7 @@ four pieces instead of hand-rolling a sticky string.
 
 | channel | meaning | lifecycle | source (per agent) | how it's injected at each cycle |
 |---|---|---|---|---|
-| **identity** | who the agent is (persona, role) | sticky for the run; immutable reference `ctx.base_prompt` | `Agent(system_prompt=…)` > the agent's `prompt.md` (`Hooks.prompt`) > built-in default | carried in `ctx.system_prompt`; `before_llm` may specialize it |
+| **identity** | who the agent is (persona, role) | sticky across turns (the baseline `ctx.base_prompt` is **re-seeded on an agent switch**, not carried over); the immutable reference is the *model* ref `ctx.base_model` | `Agent(system_prompt=…)` > the agent's `prompt.md` (`Hooks.prompt`) > built-in default | carried in `ctx.system_prompt`; `before_llm` may specialize it |
 | **context** | the *situation* this round (RAG chunks, date, current state) | **per-round, non-sticky** | the agent's `context.md` (`Hooks.context`) baseline | core seeds `ctx.context` from the baseline each round; `before_llm` may replace it; folded into the system message |
 | **examples** | few-shot demonstrations of desired behaviour | **per-round, non-sticky** | the agent's `examples.jsonl` (`Hooks.examples`) baseline | core seeds `ctx.examples` from the baseline each round; `before_llm` may replace it (spliced between the system message and the hook's `ctx.messages` zone) |
 | **addendum** | a short *this-turn* note ("be especially careful") | **per-round, non-sticky** | set by a hook each round in `before_llm` | folded into the system message, last |
@@ -513,7 +513,7 @@ for the session / agent — not by writing these):
 | `agent.agent_name`    | the active agent (`None` = the main / root agent) |
 | `agent.run_id`        | the established run id (auto-generated if none was set) |
 | `agent.session_id`    | the active session id |
-| `agent.base_prompt`   | the immutable system prompt for the run |
+| `agent.base_prompt`   | the active agent's established baseline system prompt (re-seeded on every agent switch; sticky across turns; the `ctx.base_model` *model* reference is what never changes) |
 | `agent.system_prompt` | the current system prompt (sticky; a hook may have changed it) |
 | `agent.model_config`  | the model the core currently calls (= `ctx.current_model`); see [Model selection](#model-selection-dynamic-sticky) |
 | `agent.history`       | the stored message list (every turn so far) |
@@ -670,16 +670,19 @@ def budget_guard(ctx: RunContext):
 The core sends a single `role: "system"` message as `messages[0]`; the text
 comes from **`ctx.system_prompt`**, and it is **sticky**:
 
-1. At construction, `Agent` seeds both `ctx.base_prompt` (immutable) and
-   `ctx.system_prompt` from its `system_prompt` argument (default
-   `DEFAULT_SYSTEM_PROMPT`).
-2. Before each `before_llm`, the core has **already** put the current
-   `system_prompt` at `messages[0]` and rebuilt `ctx.messages`. The hook may
-   leave it alone or set `ctx.system_prompt` to something new — that new value
-   is applied to `messages[0]` *after* the hook and is carried to the **next**
-   request too (it's sticky; you don't re-assert it).
-3. The original is always available at `ctx.base_prompt` — use it to extend,
-   patch, or restore.
+ 1. At construction, `Agent` seeds both `ctx.base_prompt` (the active agent's
+    established baseline) and `ctx.system_prompt` from its `system_prompt`
+    argument (default `DEFAULT_SYSTEM_PROMPT`). On any agent switch the core
+    re-seeds both from the incoming agent's identity — the outgoing agent's
+    value is replaced, not carried over.
+ 2. Before each `before_llm`, the core has **already** put the current
+    `system_prompt` at `messages[0]` and rebuilt `ctx.messages`. The hook may
+    leave it alone or set `ctx.system_prompt` to something new — that new value
+    is applied to `messages[0]` *after* the hook and is carried to the **next**
+    request too (it's sticky; you don't re-assert it).
+ 3. The active agent's baseline is available at `ctx.base_prompt` — use it to
+    extend, patch, or restore (it is the incoming agent's declared prompt, e.g.
+    its `prompt.md`). The immutable model reference is `ctx.base_model`.
 
 Four verbs, one channel:
 
@@ -1521,8 +1524,11 @@ Breaking any of these is a **major** change.
 8. **No re-entry.** A hook must not call `agent.chat()` from inside itself.
 9. **Hooks are synchronous.** The agent loop runs in a worker thread; async
    hooks are out of scope.
-10. **Establishment fires on need.** Run hooks strictly once; session hooks on
-     each (re)establishment. Do not assume establishment fires every `chat()`.
+10. **Establishment fires on need.** Run hooks once per (re)establishment;
+    session hooks on each (re)establishment. Do not assume establishment fires
+    every `chat()`. (If an establishment hook *raises*, the core re-fires it on
+    the next `chat()` until it succeeds — the "once" guarantee assumes it runs
+    to completion.)
 11. **The agent boundary is RAII and atomic.** There is always an agent in
     place (the main one when `agent_name` is `None`). `enter_agent` fires on
     first activation and on every incoming switch; `exit_agent` on every
@@ -1795,9 +1801,9 @@ total (`frontends/repl/app.py::format_tokens`).
 - **agent loop** — the `Agent.chat()` cycle: send the message + tool schemas to
   the LLM, run any tool calls the LLM returned, and repeat until it returns
   plain text.
-- **base prompt** — `ctx.base_prompt`: the immutable original system prompt for
-  the run. Always available to hooks; use it as the source when computing a
-  new `ctx.system_prompt`.
+- **base prompt** — `ctx.base_prompt`: the active agent's established baseline
+  system prompt — re-seeded on an agent switch, sticky across turns. Always
+  available to hooks; use it as the source when computing a new `ctx.system_prompt`.
 - **base model** — `ctx.base_model`: the immutable `LLMConfig` the `Agent` was
   built with; the canonical restore target (`ctx.current_model = ctx.base_model`).
   See [Model selection](#model-selection-dynamic-sticky).

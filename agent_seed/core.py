@@ -275,7 +275,11 @@ class Agent:
           (or ``before_llm``), which runs *after* the re-seed and therefore
           wins.
         - the **incoming** agent's ``enter_agent`` fires (``ctx.agent_name`` is
-          now the *new* value).
+          now the *new* value). Raising it rolls the **whole** switch back to
+          the outgoing agent's committed state (``agent_name``, hooks,
+          ``allowed_tools``, identity, establishment flags) and re-raises — the
+          switch is atomic on both sides: ``exit_agent`` runs before any state
+          is touched, and a failing ``enter_agent`` never leaves a half-switch.
 
         The new agent's establishment hooks (``initialize_run`` / ``ready_run``
         / ``initialize_session`` / ``ready_session``) then re-fire on the next
@@ -294,6 +298,18 @@ class Agent:
         # Outgoing agent takes the wheel off. If it raises, nothing is changed.
         if self.hooks.exit_agent is not None:
             self.hooks.exit_agent(self._context)
+        # Snapshot the pre-commit state so the switch is atomic on BOTH sides:
+        # exit_agent already ran pre-commit, and a failing incoming enter_agent
+        # must leave the run exactly as the outgoing agent's (nothing half-set).
+        snap = {
+            "agent_name": self._context.agent_name,
+            "hooks": self.hooks,
+            "allowed_tools": self._context.allowed_tools,
+            "base_prompt": self._context.base_prompt,
+            "system_prompt": self._context.system_prompt,
+            "run_established": self._run_established,
+            "session_established": self._session_established,
+        }
         # Commit the switch.
         self._context.agent_name = agent_name
         if not self._hooks_explicit:
@@ -314,9 +330,20 @@ class Agent:
         identity = self.hooks.prompt or DEFAULT_SYSTEM_PROMPT
         self._context.base_prompt = identity
         self._context.system_prompt = identity
-        # Incoming agent takes the wheel.
-        if self.hooks.enter_agent is not None:
-            self.hooks.enter_agent(self._context)
+        # Incoming agent takes the wheel. If it raises, roll the whole switch
+        # back to the outgoing agent's committed state (atomic, both sides).
+        try:
+            if self.hooks.enter_agent is not None:
+                self.hooks.enter_agent(self._context)
+        except Exception:  # noqa: BLE001 - atomic switch boundary (roll back + re-raise)
+            self._context.agent_name = snap["agent_name"]
+            self.hooks = snap["hooks"]
+            self._context.allowed_tools = snap["allowed_tools"]
+            self._context.base_prompt = snap["base_prompt"]
+            self._context.system_prompt = snap["system_prompt"]
+            self._run_established = snap["run_established"]
+            self._session_established = snap["session_established"]
+            raise
         self._run_established = False
         self._session_established = False
 

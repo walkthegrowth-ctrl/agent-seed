@@ -194,8 +194,11 @@ tests/
 
 - **Tool round-trip cap** (`MAX_TOOL_ROUNDS = 8`); the core then forces a
   final answer with tools disabled.
-- **Tool errors are reported to the model** (`role: tool`, `error: ...`), not
-  raised to the user.
+- **Tool errors are reported to the model**: a `ToolError` (or a `TypeError` from
+  a bad argument) becomes a `role: tool` message (`error: ...`) the LLM adapts
+  to, not raised to the user. Other exceptions a tool raises are not guaranteed
+  contained — raise `ToolError` to fail cleanly (see `manual.md`, "Conventions
+  & gotchas").
 - **Sessions are in-memory** and single-user by design — deliberately no
   auth, persistence, or rate limiting (see `docs/architecture.md` for the
   boundaries and extension points).

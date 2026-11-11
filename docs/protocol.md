@@ -50,7 +50,8 @@ A `session_id` is valid as soon as the **client** names it — frontends mint
 their own id at startup. So this works even before the first `POST /chat`:
 
 - If a config was already `POST /config`-ed for that id, the response echoes it
-  (`llm` = the pending config, `base` = the app default).
+  (`llm` = the pending config, `base` = the app default — or `null` if no app
+  default is determinable, e.g. `LLM_MODEL` unset and no `POST /config` was made).
 - `404` only if the id was never touched (no live session and no pending config).
 
 ## `POST /config`
@@ -123,7 +124,11 @@ a *finding*, not a change — use `POST /config` for a gated change).
 `400` — the backend has no base LLM to merge over (e.g. `LLM_MODEL` unset, no
 pending/app config, and the body doesn't supply enough of
 `base_url` / `api_key` / `model`). The backend does **not** fabricate a default
-to probe — a client error is returned instead.
+to probe — a client error is returned instead:
+
+```json
+{ "ok": false, "error": "no base LLM config to probe against (…)" }
+```
 
 ## `GET /tools`
 

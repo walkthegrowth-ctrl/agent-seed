@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date
+from datetime import UTC, datetime
 
 
 def current_date() -> str:
     """Today's date (YYYY-MM-DD) in UTC."""
-    return date.today(UTC).strftime("%Y-%m-%d")
+    return datetime.now(UTC).date().strftime("%Y-%m-%d")

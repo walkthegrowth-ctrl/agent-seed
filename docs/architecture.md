@@ -84,9 +84,11 @@ no auth, single-user by design — see below.
   OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, OpenRouter, ...).
 - **Tool schemas built from type hints.** No pydantic for tool input; a small
   `type_to_schema` maps `str/int/float/bool`, `list[T]`, `dict`, `Any`.
-- **Errors are reported to the model, not raised to the user.** A tool
-  exception becomes a `role: tool` message `error: ...` so the LLM can
-  recover. Stream-level failures become an SSE `event: error`.
+- **Tool errors are reported to the model, not raised to the user.** A tool
+  `ToolError` (or a `TypeError` from a bad argument) becomes a `role: tool`
+  message `error: ...` so the LLM can recover (other exceptions a tool raises are
+  not guaranteed contained — raise `ToolError` to fail cleanly, `manual.md`
+  "Conventions & gotchas"). Stream-level failures become an SSE `event: error`.
 - **Tool round-trip cap** (`MAX_TOOL_ROUNDS = 8`) prevents runaway loops; the
   core then forces a final answer with tools disabled.
 - **Prompt composition is a default render, not a lock.** Each round's messages
