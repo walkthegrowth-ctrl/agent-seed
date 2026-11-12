@@ -271,7 +271,7 @@ def _help_layout() -> str:
     commands = [
         ("/help", "show this help"),
         ("/reset", "start a new session (clears server-side history)"),
-        ("/agent [n]", "set the agent (a hooks subdirectory); no arg shows the current"),
+        ("/agent <n>", "set the agent (a hooks subdirectory); no arg shows the current"),
         ("/agent default", "switch back to the main agent (the hooks root)"),
         ("/agents", "list the discoverable agent names on the backend"),
         ("/tools", "list the tools registered on the backend"),

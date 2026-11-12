@@ -544,7 +544,7 @@ def test_help_output_is_column_aligned(repl: ReplDriver) -> None:
     ref = help_row.index("show this help")
     # Each previously-misaligned command (and `/model <n>` as a second reference)
     # must have its description at the same column.
-    for cmd in ("/model force <n>", "/model test <n>", "/model <n>"):
+    for cmd in ("/agent <n>", "/model force <n>", "/model test <n>", "/model <n>"):
         row = next(ln for ln in HELP.splitlines() if cmd in ln)
         idx = row.index(cmd) + len(cmd)
         col = idx

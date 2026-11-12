@@ -95,7 +95,7 @@ See `docs/howto-craft-an-agent.md` for the step-by-step walk-through.
 REPL commands (type `/help` for the full, aligned list): `/reset` (clear
 server-side session), `/tools` (list tools), `/usage` (session token total;
 `/usage on|off|toggle` switches the per-turn report line, on by default),
-`/agent [name]` (switch agent; `/agent default` returns to the main agent) and
+`/agent <name>` (switch agent; `/agent default` returns to the main agent) and
 `/agents` (list them), `/model` (show the session's LLM config),
 `/model <name>` (probe-then-switch), `/model test <name>` (probe without
 switching), `/model force <name>` (switch without a probe), `/quit` (or
